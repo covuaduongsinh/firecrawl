@@ -94,11 +94,11 @@ export default function AIEngineSettings({
           : `${modelLabel} (Chưa có Key)`;
       case "claude":
         if (config.claudeApiKey) {
-          return `${config.claudeModel || "claude-3-5-sonnet"} (API Key)`;
+          return `${config.claudeModel || "claude-sonnet-5"} (API Key)`;
         }
         return cliInfo.claude.available
-          ? `${config.claudeModel || "claude-3-5-sonnet"} (Claude CLI)`
-          : `${config.claudeModel || "claude-3-5-sonnet"} (Chưa có Key)`;
+          ? `${config.claudeModel || "claude-sonnet-5"} (Claude CLI)`
+          : `${config.claudeModel || "claude-sonnet-5"} (Chưa có Key)`;
       case "ollama":
         return `${config.ollamaModel || "llama3"} (Local: ${config.ollamaBaseUrl})`;
       case "openai":
@@ -393,9 +393,9 @@ export default function AIEngineSettings({
                     onChange={(e) => handleFieldChange("claudeModel", e.target.value)}
                     className="w-full h-9 rounded-md bg-slate-900 border border-slate-700 text-slate-200 text-xs px-2.5 mt-1 focus:outline-none focus:ring-1 focus:ring-purple-500"
                   >
-                    <option value="claude-3-5-sonnet">Claude 3.5 Sonnet (Thông minh & Chuẩn xác)</option>
-                    <option value="claude-3-5-haiku">Claude 3.5 Haiku (Siêu tốc độ)</option>
-                    <option value="claude-3-opus">Claude 3 Opus</option>
+                    <option value="claude-sonnet-5">Claude Sonnet 5 (Cân bằng — Khuyên dùng)</option>
+                    <option value="claude-opus-5-5">Claude Opus 5.5 (Chính xác cao nhất)</option>
+                    <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (Nhanh & tiết kiệm)</option>
                   </select>
                 </div>
               </div>

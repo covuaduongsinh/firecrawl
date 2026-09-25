@@ -22,7 +22,7 @@ export const DEFAULT_AI_CONFIG: AIEngineConfig = {
   geminiApiKey: "",
   geminiModel: "gemini-3.7-flash",
   claudeApiKey: "",
-  claudeModel: "claude-3-5-sonnet",
+  claudeModel: "claude-sonnet-5",
   ollamaBaseUrl: "http://localhost:11434",
   ollamaModel: "llama3",
   openaiApiKey: "",
@@ -32,11 +32,31 @@ export const DEFAULT_AI_CONFIG: AIEngineConfig = {
 
 const STORAGE_KEY = "firecrawl_ai_engine_config";
 
+/** Model Claude cũ (dòng 3.x) đã ngừng hoạt động — tự chuyển sang model mặc định hiện hành. */
+const RETIRED_CLAUDE_MODEL = /^claude-3/;
+
+/**
+ * Header cho Anthropic API khi gọi trực tiếp từ trình duyệt.
+ * `anthropic-dangerous-direct-browser-access` bắt buộc để API trả CORS header.
+ */
+function anthropicHeaders(key: string): Record<string, string> {
+  return {
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "anthropic-dangerous-direct-browser-access": "true",
+  };
+}
+
 export function loadAIConfig(): AIEngineConfig {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
-      return { ...DEFAULT_AI_CONFIG, ...JSON.parse(saved) };
+      const merged: AIEngineConfig = { ...DEFAULT_AI_CONFIG, ...JSON.parse(saved) };
+      if (RETIRED_CLAUDE_MODEL.test(merged.claudeModel)) {
+        merged.claudeModel = DEFAULT_AI_CONFIG.claudeModel;
+      }
+      return merged;
     }
   } catch (e) {
     console.error("Lỗi đọc cấu hình AI:", e);
@@ -165,10 +185,10 @@ export async function testAIConnection(
         };
       }
       const model = config.geminiModel || "gemini-2.5-flash";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
         body: JSON.stringify({
           contents: [{ parts: [{ text: "Respond 'OK'" }] }],
           generationConfig: { maxOutputTokens: 10 },
@@ -209,10 +229,21 @@ export async function testAIConnection(
           latencyMs: latency,
         };
       }
+      const res = await fetch("https://api.anthropic.com/v1/models?limit=1", {
+        headers: anthropicHeaders(key),
+      });
       const latency = Math.round(performance.now() - start);
+      if (!res.ok) {
+        const err = await res.text();
+        return {
+          success: false,
+          message: `Lỗi kết nối Claude API (${res.status}): ${err.slice(0, 150)}`,
+          latencyMs: latency,
+        };
+      }
       return {
         success: true,
-        message: `✅ Anthropic Claude API Key đã được thiết lập sẵn sàng.`,
+        message: `✅ Kết nối thành công Anthropic Claude API (${latency}ms)! Model ${config.claudeModel || DEFAULT_AI_CONFIG.claudeModel} sẵn sàng.`,
         latencyMs: latency,
       };
     }
@@ -314,7 +345,7 @@ IMPORTANT RULES:
     // Nếu có API Key -> Dùng REST API
     if (key) {
       const model = config.geminiModel || "gemini-2.5-flash";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
       const payload: any = {
         contents: [{ parts: [{ text: finalPrompt }] }],
@@ -327,7 +358,7 @@ IMPORTANT RULES:
 
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
         body: JSON.stringify(payload),
       });
 
@@ -378,15 +409,10 @@ IMPORTANT RULES:
 
     // Nếu có API Key -> Gọi Claude API Direct
     if (key) {
-      const model = config.claudeModel || "claude-3-5-sonnet-20241022";
+      const model = config.claudeModel || DEFAULT_AI_CONFIG.claudeModel;
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: {
-          "x-api-key": key,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-          "dangerously-allow-browser": "true",
-        },
+        headers: anthropicHeaders(key),
         body: JSON.stringify({
           model,
           max_tokens: 8192,
@@ -430,7 +456,7 @@ IMPORTANT RULES:
     return {
       extractedJson: parseAIOutputSafe(cliData.rawOutput),
       engineUsed: "Claude Code CLI (claude)",
-      modelUsed: config.claudeModel || "claude-3-5-sonnet",
+      modelUsed: config.claudeModel || "Claude Code mặc định",
     };
   }
 

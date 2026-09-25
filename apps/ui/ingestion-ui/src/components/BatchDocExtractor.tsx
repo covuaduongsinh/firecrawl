@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -18,7 +18,6 @@ import {
   Check,
   Globe,
   Loader2,
-  ExternalLink,
   Code,
   FileText,
   AlertCircle,
@@ -28,7 +27,7 @@ import {
 import DocTreeView from '@/components/DocTreeView';
 import PromptBankSelector from '@/components/PromptBankSelector';
 import AIEngineSettings from '@/components/AIEngineSettings';
-import { DocCategory, DocItem, scanDocTree, normalizeDocUrl } from '@/lib/docTreeScanner';
+import { DocCategory, DocItem, scanDocTree } from '@/lib/docTreeScanner';
 import {
   exportToZip,
   exportToMergedMarkdown,
@@ -81,7 +80,7 @@ export default function BatchDocExtractor({
   // Batch Runner State
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
-  const [currentProcessingItem, setCurrentProcessingItem] = useState<DocItem | null>(null);
+  const [, setCurrentProcessingItem] = useState<DocItem | null>(null);
   const [progressText, setProgressText] = useState<string>('');
 
   // Auto-Download & Auto-Save State
@@ -633,7 +632,7 @@ export default function BatchDocExtractor({
               </Label>
               <AIEngineSettings
                 config={aiConfig}
-                onConfigChange={(newCfg) => setAiConfig(newCfg)}
+                onChange={setAiConfig}
               />
             </div>
           </div>
