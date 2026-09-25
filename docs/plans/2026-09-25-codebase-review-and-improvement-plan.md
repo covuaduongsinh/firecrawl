@@ -145,3 +145,27 @@ quyết định chất lượng bản dịch/tài liệu đưa vào Obsidian.
 - Timeout: giả lập CLI treo → nhận 504 một lần, dev server không crash.
 - E2E thủ công (skill `run`/Playwright): quét `https://docs.frappe.io/education`, chạy 3 bài, Dừng giữa chừng
   rồi Bắt đầu lại → không có 2 vòng lặp; tải lại trang → khôi phục phiên từ IndexedDB; xuất Obsidian mở được trong vault.
+
+---
+
+## 5. Kết quả thực hiện GĐ 0–3 (25/09/2026)
+
+| GĐ | Commit | Đã làm |
+|---|---|---|
+| 0 | `fix(ui): repair build, AI engine switch crash…` | Build xanh trở lại; hết crash khi đổi AI Engine; Claude API gọi được từ trình duyệt + model mới; Gemini key ra khỏi URL; bộ lọc boilerplate chỉ lọc nguyên dòng; lint chạy được; CLAUDE.md khôi phục quy trình gốc |
+| 1 | `fix(ui): harden the local CLI/proxy bridge…` | `bridge/` mới: kiểm tra Host/Origin/token, CLI chạy **không tool** (Claude: `--tools "" --permission-mode dontAsk`, prompt qua stdin), bỏ `--dangerously-skip-permissions`, proxy chặn IP nội bộ + kiểm tra từng redirect + timeout/giới hạn 10MB, timeout không còn làm sập dev server |
+| 2 | `fix(ui): convert pages with a real HTML parser…` | HTML→Markdown bằng DOMParser + turndown (bảng, code, link tương đối); trang dài chia phần theo heading rồi ghép; retry 408/429/5xx; nâng giới hạn token đầu ra |
+| 3 | `feat(ui): reliable batch runner…` | Dừng = hủy thật (AbortController), không thể chạy 2 vòng song song; bỏ qua bài đã dịch; chạy song song 1–3; lưu phiên IndexedDB (hết giới hạn 5MB, tự chuyển phiên cũ); ghi thẳng từng bài vào thư mục (vault Obsidian) + README mục lục; định dạng Obsidian (frontmatter, `[[#…]]`); nhớ URL gần nhất |
+
+**Kiểm chứng**
+- `pnpm build` ✅ · `pnpm test` ✅ 57/57 test (9 file) · lint các file đã sửa ✅ (toàn dự án: 45 → 27 lỗi cũ, xử lý ở GĐ 4).
+- Test hồi quy chứng minh lỗi cũ: 4/4 test HTML→Markdown và 2/7 test formatter **trượt trên code cũ**, pass trên code mới.
+- Bridge thật qua `vite dev`: CSRF `text/plain` từ origin lạ → 403; `127.0.0.1:3002` → bị chặn; Claude CLI thật trả kết quả qua bridge với cờ mới.
+- E2E Playwright (site tài liệu giả kiểu Frappe Wiki + API AI giả trả 429 lần đầu): quét 2 chuyên mục/4 bài → dịch 4/4 (429 được tự thử lại; trang dài chia 3 phần, đủ đến cuối trang; sidebar/footer bị loại, bảng giữ nguyên) → chạy lại với "bỏ qua bài đã dịch" không gọi AI → Dừng giữa chừng: không gọi thêm, không bài nào bị đánh lỗi → tải lại trang → khôi phục 4/4 từ IndexedDB. Không có lỗi JS.
+
+**Việc Thầy cần kiểm tra trên máy Windows**
+- Antigravity CLI (`agy`) nay chạy **không** `--dangerously-skip-permissions`. Nếu `agy` treo chờ cấp quyền, hãy báo lại — cần tra cờ "không dùng tool" tương ứng của `agy` (không thể thử trong môi trường này).
+- Chế độ "Ghi thẳng vào thư mục" cần Chrome/Edge; lần đầu chạy sẽ hỏi chọn thư mục (chọn thư mục trong vault OBSIDIAN2026).
+- Khi cào site nội bộ/localhost qua proxy: đặt `BRIDGE_ALLOW_PRIVATE_URLS=1` trước `pnpm dev`.
+
+**Còn lại:** GĐ 4 (dọn 27 lỗi lint, tách component/hook, CI cho ingestion-ui) và GĐ 5 (Dockerfile + service UI/bridge, chuyển sang API v2).
