@@ -46,4 +46,12 @@ describe("convertHtmlToMarkdown", () => {
     const html = `<article><p>${filler}</p><pre><code class="language-python">print("hi")</code></pre></article>`;
     expect(convertHtmlToMarkdown(html, BASE)).toContain('```python\nprint("hi")\n```');
   });
+
+  it("loại bỏ chuỗi data:image base64 khổng lồ để tránh làm phình markdown", () => {
+    const hugeBase64 = "data:image/png;base64," + "A".repeat(10000);
+    const html = `<article><p>${filler}</p><img src="${hugeBase64}" alt="Ảnh chụp màn hình"></article>`;
+    const md = convertHtmlToMarkdown(html, BASE);
+    expect(md).not.toContain("data:image/png;base64");
+    expect(md.length).toBeLessThan(1000);
+  });
 });

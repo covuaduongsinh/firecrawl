@@ -92,6 +92,24 @@ export function convertHtmlToMarkdown(html: string, baseUrl: string): string {
   main.querySelectorAll("img[data-src]:not([src])").forEach((img) => {
     img.setAttribute("src", img.getAttribute("data-src") || "");
   });
+
+  // Strip massive inline base64 image data to avoid blowing up Markdown size and chunk counts for AI
+  main.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    if (src.startsWith("data:") || src.length > 500) {
+      const alt = img.getAttribute("alt") || "Hình ảnh";
+      img.setAttribute("src", "");
+      if (!img.getAttribute("alt")) {
+        img.setAttribute("alt", alt);
+      }
+    }
+  });
+
+  // Strip huge data URIs from links
+  main.querySelectorAll("a[href^='data:']").forEach((a) => {
+    a.setAttribute("href", "#");
+  });
+
   absolutize(main, "href", baseUrl);
   absolutize(main, "src", baseUrl);
 
