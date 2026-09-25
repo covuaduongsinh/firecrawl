@@ -168,4 +168,18 @@ quyết định chất lượng bản dịch/tài liệu đưa vào Obsidian.
 - Chế độ "Ghi thẳng vào thư mục" cần Chrome/Edge; lần đầu chạy sẽ hỏi chọn thư mục (chọn thư mục trong vault OBSIDIAN2026).
 - Khi cào site nội bộ/localhost qua proxy: đặt `BRIDGE_ALLOW_PRIVATE_URLS=1` trước `pnpm dev`.
 
-**Còn lại:** GĐ 4 (dọn 27 lỗi lint, tách component/hook, CI cho ingestion-ui) và GĐ 5 (Dockerfile + service UI/bridge, chuyển sang API v2).
+
+---
+
+## 6. Kết quả thực hiện GĐ 4–5
+
+| GĐ | Đã làm |
+|---|---|
+| 4 | `pnpm lint` **0 lỗi** (từ 45); xóa component V0 cũ + dependency thừa; tách `useBatchRunner` (có test chống chạy chồng/dừng); workflow CI `ingestion-ui.yml` (lint, test, build + build Docker image & smoke test) |
+| 5 | Client API **v2** (`firecrawlClient.ts`): scrape, map (chuẩn hóa link), extract **poll tới khi xong** — UI cũ gọi `/v1/extract` rồi hiển thị ngay phản hồi đầu (chỉ có `id`, không có dữ liệu). Server production `bridge/server.ts`: phục vụ app, chèn token, Basic Auth, proxy `/firecrawl` gắn key phía server, tắt CLI, từ chối khởi động nếu mở domain mà thiếu mật khẩu. `Dockerfile` (không nginx, user thường, healthcheck), service compose `ingestion-ui` (profile `ui`, mặc định chỉ bind 127.0.0.1), hướng dẫn `docs/deploy-ingestion-ui.md` |
+
+**Lỗi phát hiện nhờ chạy thử production:** Vite plugin cũng chèn token lúc `vite build` → trang production có 2 token, token cũ đứng trước → mọi lời gọi `/api/proxy` sẽ bị 403. Đã sửa (`apply: "serve"` + server loại token cũ) và có test hồi quy.
+
+**Kiểm chứng:** 73/73 test; lint/build xanh; bước build của Dockerfile tái hiện trên bản sao sạch (`pnpm install --frozen-lockfile`, build, bundle server 23 KB không cần node_modules); runtime chạy chỉ với `dist/` + `server.mjs`: healthz 200, không mật khẩu 401, CLI 403, từ chối khởi động khi thiếu mật khẩu; **E2E Playwright toàn luồng qua server production có đăng nhập đạt**. Không build được image trong sandbox (Docker Hub trả 429) → job `docker` trong CI build + smoke test image thật.
+
+**Còn mở (không chặn deploy):** `ingestionV1.tsx` (~1.000 dòng) và phần JSX của `BatchDocExtractor.tsx` vẫn dài — nên tách thành các panel nhỏ khi có thay đổi giao diện tiếp theo.

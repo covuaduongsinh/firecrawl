@@ -47,6 +47,7 @@ import { useBatchRunner } from '@/hooks/useBatchRunner';
 import { isAbortError, withRetry } from '@/lib/retry';
 import { countDoneItems, loadSession, saveSession } from '@/lib/sessionStore';
 import { scrapePageMarkdown } from '@/lib/pageScraper';
+import { DEFAULT_FIRECRAWL_BASE_URL } from '@/lib/firecrawlClient';
 
 interface BatchDocExtractorProps {
   firecrawlApiUrl?: string;
@@ -90,7 +91,7 @@ function saveLastRootUrl(url: string) {
 const RETRY_OPTIONS = { retries: 3, baseDelayMs: 2000 };
 
 export default function BatchDocExtractor({
-  firecrawlApiUrl = 'http://localhost:3002',
+  firecrawlApiUrl = DEFAULT_FIRECRAWL_BASE_URL,
   apiKey = '',
 }: BatchDocExtractorProps) {
   // Input State

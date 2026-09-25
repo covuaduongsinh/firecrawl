@@ -44,3 +44,19 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build image
+        run: docker build -t ingestion-ui:ci apps/ui/ingestion-ui
+      - name: Smoke test
+        run: |
+          docker run -d --name ui -p 3006:3006 -e UI_BASIC_AUTH=ci:secret ingestion-ui:ci
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:3006/healthz && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3006/)" = "401"
+          curl -sf -u ci:secret http://127.0.0.1:3006/ | grep -q 'firecrawl-bridge-token'
+          docker rm -f ui

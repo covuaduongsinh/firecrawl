@@ -36,13 +36,54 @@ import {
   executeDirectAIExtract,
 } from "@/lib/aiEngines";
 import { formatExtractToMarkdown } from "@/lib/markdownFormatter";
+import { extract, map, resolveFirecrawlOptions, scrape, ScrapeData } from "@/lib/firecrawlClient";
 
-//! Dynamic API URL fallback to current host or local instance
-const FIRECRAWL_API_URL =
-  import.meta.env.VITE_FIRECRAWL_API_URL ||
-  (typeof window !== "undefined" && window.location.origin ? window.location.origin : "http://localhost:3002");
-const FIRECRAWL_API_KEY =
-  import.meta.env.VITE_FIRECRAWL_API_KEY || "";
+// Firecrawl API: mặc định đi qua proxy /firecrawl (dev: vite.config.ts, production: bridge/server.ts).
+const FIRECRAWL = resolveFirecrawlOptions();
+
+/** Converts a v2 scrape result into the shape the results panel renders. */
+function toScrapeResult(url: string, data: ScrapeData): ScrapeResult {
+  const metadata = data.metadata ?? {};
+  return {
+    success: true,
+    data: {
+      markdown: data.markdown ?? "",
+      content: data.markdown ?? "",
+      html: data.html ?? "",
+      rawHtml: data.rawHtml ?? "",
+      llm_extraction: {},
+      warning: data.warning,
+      metadata: {
+        title: metadata.title || url,
+        description: metadata.description ?? "",
+        language: metadata.language ?? "",
+        sourceURL: metadata.sourceURL ?? url,
+        pageStatusCode: metadata.statusCode ?? 200,
+      },
+    },
+  };
+}
+
+function failedScrapeResult(url: string, error: unknown): ScrapeResult {
+  return {
+    success: false,
+    data: {
+      metadata: {
+        sourceURL: url,
+        title: "Scrape Failed",
+        description: "",
+        language: "",
+        pageStatusCode: 500,
+        pageError: error instanceof Error ? error.message : "Unknown error",
+      },
+      markdown: "",
+      content: "",
+      html: "",
+      rawHtml: "",
+      llm_extraction: {},
+    },
+  };
+}
 
 interface FormData {
   url: string;
@@ -60,36 +101,6 @@ interface ExtractFormData {
   prompt: string;
   useSchema: boolean;
   schema: string;
-}
-
-interface CrawlerOptions {
-  includes?: string[];
-  excludes?: string[];
-  maxDepth?: number;
-  limit?: number;
-  returnOnlyUrls: boolean;
-}
-
-interface ScrapeOptions {
-  formats?: string[];
-  onlyMainContent?: boolean;
-}
-
-interface PageOptions {
-  onlyMainContent: boolean;
-}
-
-interface RequestBody {
-  url: string;
-  crawlerOptions?: CrawlerOptions;
-  pageOptions?: PageOptions;
-  search?: string;
-  excludePaths?: string[];
-  includePaths?: string[];
-  maxDepth?: number;
-  limit?: number;
-  scrapeOptions?: ScrapeOptions;
-  formats?: string[];
 }
 
 interface ScrapeResultMetadata {
@@ -309,103 +320,26 @@ export default function FirecrawlComponentV1() {
     setShowCrawlStatus(false);
 
     try {
-      const endpoint = `${FIRECRAWL_API_URL}/v1/${
-        formData.crawlSubPages ? "map" : "scrape"
-      }`;
-
-      const requestBody: RequestBody = formData.crawlSubPages
-        ? {
-            url: formData.url,
-            search: formData.search || undefined,
-            limit: formData.limit ? parseInt(formData.limit) : undefined,
-          }
-        : {
-            url: formData.url,
-            formats: ["markdown"],
-          };
-
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
       if (formData.crawlSubPages) {
-        if (data.success === true && Array.isArray(data.links)) {
-          setCrawledUrls(data.links);
-          setSelectedUrls(data.links);
-          setCrawlStatus({
-            current: data.links.length,
-            total: data.links.length,
-          });
-
-          const linkResults: Record<string, ScrapeResult> = {};
-          data.links.forEach((link: string) => {
-            linkResults[link] = {
-              success: true,
-              data: {
-                metadata: {
-                  sourceURL: link,
-                  title: link,
-                  description: "",
-                  language: "",
-                  pageStatusCode: 200,
-                },
-                markdown: "",
-                content: "",
-                html: "",
-                rawHtml: "",
-                llm_extraction: {},
-              },
-            };
-          });
-          setScrapeResults(linkResults);
-        }
-      } else {
-        setScrapeResults({
-          [formData.url]: {
-            success: true,
-            data: {
-              ...data.data,
-              metadata: {
-                ...data.data.metadata,
-                title: data.data.metadata?.title || formData.url,
-              },
-            },
-          },
+        const links = await map(FIRECRAWL, formData.url, {
+          search: formData.search || undefined,
+          limit: formData.limit ? parseInt(formData.limit) : undefined,
         });
+        setCrawledUrls(links);
+        setSelectedUrls(links);
+        setCrawlStatus({ current: links.length, total: links.length });
+        const linkResults: Record<string, ScrapeResult> = {};
+        links.forEach((link) => {
+          linkResults[link] = toScrapeResult(link, {});
+        });
+        setScrapeResults(linkResults);
+      } else {
+        const data = await scrape(FIRECRAWL, formData.url, { formats: ["markdown"] });
+        setScrapeResults({ [formData.url]: toScrapeResult(formData.url, data) });
       }
     } catch (error) {
       console.error("Scrape error:", error);
-      setScrapeResults({
-        [formData.url]: {
-          success: false,
-          data: {
-            metadata: {
-              sourceURL: formData.url,
-              title: "Scrape Failed",
-              description: "",
-              language: "",
-              pageStatusCode: 500,
-              pageError:
-                error instanceof Error ? error.message : "Unknown error",
-            },
-            markdown: "",
-            content: "",
-            html: "",
-            rawHtml: "",
-            llm_extraction: {},
-          },
-        },
-      });
+      setScrapeResults({ [formData.url]: failedScrapeResult(formData.url, error) });
     } finally {
       setLoading(false);
       setShowCrawlStatus(false);
@@ -440,29 +374,14 @@ export default function FirecrawlComponentV1() {
         }
       }
 
-      // Case 1: Sử dụng Firecrawl Server Native Endpoint (/v1/extract)
+      // Case 1: Sử dụng Firecrawl Server Native Endpoint (/v2/extract, chờ job hoàn tất)
       if (aiConfig.engine === "firecrawl") {
-        const requestBody = {
+        const data = await extract(FIRECRAWL, {
           urls: urlList,
           prompt: extractFormData.prompt,
           schema: parsedSchema,
-        };
-
-        const response = await fetch(`${FIRECRAWL_API_URL}/v1/extract`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(requestBody),
         });
-
-        const data: ExtractApiResponse = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error || `HTTP error! status: ${response.status}`);
-        }
-
-        setExtractResult(data);
+        setExtractResult({ success: true, data });
       } else {
         // Case 2: Trích xuất thông minh qua AI Engine đã chọn (Gemini / Claude / Ollama / OpenAI)
         // Bước 1: Cào nội dung sạch (Markdown) từ Firecrawl Scrape API
@@ -473,26 +392,16 @@ export default function FirecrawlComponentV1() {
           const currentUrl = urlList[i];
           setCrawlStatus({ current: i + 1, total: urlList.length });
 
-          const scrapeRes = await fetch(`${FIRECRAWL_API_URL}/v1/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              url: currentUrl,
+          let md = "";
+          try {
+            const data = await scrape(FIRECRAWL, currentUrl, {
               formats: ["markdown"],
               onlyMainContent: true,
-            }),
-          });
-
-          if (!scrapeRes.ok) {
-            const errText = await scrapeRes.text();
-            throw new Error(`Lỗi cào URL ${currentUrl}: ${errText.slice(0, 150)}`);
+            });
+            md = data.markdown || "";
+          } catch (err) {
+            throw new Error(`Lỗi cào URL ${currentUrl}: ${err instanceof Error ? err.message : String(err)}`);
           }
-
-          const scrapeData = await scrapeRes.json();
-          const md = scrapeData?.data?.markdown || scrapeData?.data?.content || "";
           scrapedContents.push({ url: currentUrl, markdown: md });
         }
 
@@ -535,53 +444,10 @@ export default function FirecrawlComponentV1() {
 
       for (const url of selectedUrls) {
         try {
-          const response = await fetch(`${FIRECRAWL_API_URL}/v1/scrape`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              url: url,
-              formats: ["markdown"],
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          const data = await response.json();
-          results[url] = {
-            success: true,
-            data: {
-              ...data.data,
-              metadata: {
-                ...data.data.metadata,
-                title: data.data.metadata?.title || url,
-              },
-            },
-          };
+          const data = await scrape(FIRECRAWL, url, { formats: ["markdown"] });
+          results[url] = toScrapeResult(url, data);
         } catch (error) {
-          results[url] = {
-            success: false,
-            data: {
-              metadata: {
-                sourceURL: url,
-                title: "Scrape Failed",
-                description: "",
-                language: "",
-                pageStatusCode: 500,
-                pageError:
-                  error instanceof Error ? error.message : "Unknown error",
-              },
-              markdown: "",
-              content: "",
-              html: "",
-              rawHtml: "",
-              llm_extraction: {},
-            },
-          };
+          results[url] = failedScrapeResult(url, error);
         }
         completed++;
         setCrawlStatus({ current: completed, total: selectedUrls.length });
@@ -650,8 +516,8 @@ export default function FirecrawlComponentV1() {
       {activeTab === "batch_tree" && (
         <div className="w-full">
           <BatchDocExtractor
-            firecrawlApiUrl={FIRECRAWL_API_URL}
-            apiKey={FIRECRAWL_API_KEY}
+            firecrawlApiUrl={FIRECRAWL.baseUrl}
+            apiKey={FIRECRAWL.apiKey}
           />
         </div>
       )}

@@ -10,6 +10,8 @@ export function cliBridgePlugin(): Plugin {
   const token = createBridgeToken();
   return {
     name: "vite-plugin-firecrawl-cli-bridge",
+    // Dev server only: the production server (bridge/server.ts) injects its own token at runtime.
+    apply: "serve",
     configureServer(server) {
       server.middlewares.use(createBridgeMiddleware({ token }));
     },

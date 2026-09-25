@@ -33,6 +33,8 @@ Never bypass `knip` failures (e.g. with `git commit --no-verify`). If the pre-co
 
 - Before pushing, run `pnpm build`, `pnpm test` and `pnpm lint` in `apps/ui/ingestion-ui`. `vite dev` does not typecheck, so only `pnpm build` catches type errors.
 - Pure logic lives in `src/lib/*` and is covered by `*.test.ts` files (vitest + jsdom). Add a test there for every bug fix.
+- The UI reaches the Firecrawl API (v2) only through `src/lib/firecrawlClient.ts` and the `/firecrawl` proxy (Vite dev proxy; `bridge/server.ts` in production, which adds the API key server-side). Never bake API keys into the bundle.
+- Production = `bridge/server.ts` bundled by `pnpm build:server` into the Docker image (`Dockerfile`, compose profile `ui`). CLI endpoints are disabled there. Deployment steps: `docs/deploy-ingestion-ui.md`.
 - The local bridge (`bridge/`) serves `/api/cli/*` and `/api/proxy/*` during `vite dev`. It runs the `claude`/`agy` CLIs and fetches arbitrary URLs, so every request must pass `bridge/security.ts` checks (loopback Host, same Origin, session token). Never add a CLI flag that grants tool or permission bypass (e.g. `--dangerously-skip-permissions`): prompts contain scraped web content.
 
 ## MCP

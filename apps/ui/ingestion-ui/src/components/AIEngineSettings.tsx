@@ -469,7 +469,7 @@ export default function AIEngineSettings({
 
           {config.engine === "firecrawl" && (
             <div className="text-xs text-slate-300 bg-slate-900 p-2.5 rounded border border-slate-800">
-              💡 Chế độ này gửi trực tiếp request đến endpoint <code>/v1/extract</code> của backend Docker Firecrawl.
+              💡 Chế độ này gửi trực tiếp request đến endpoint <code>/v2/extract</code> của backend Docker Firecrawl.
             </div>
           )}
 

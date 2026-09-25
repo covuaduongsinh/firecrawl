@@ -19,6 +19,8 @@ export interface BridgeOptions {
   token: string;
   cliTimeoutMs?: number;
   fetchTimeoutMs?: number;
+  /** Disables /api/cli/* (production server: no local CLIs, and agents must not run on the VPS). */
+  disableCli?: boolean;
   /** Overridable in tests; defaults to locating the real CLI binaries. */
   resolveCli?: (engine: CliEngine, prompt: string, model?: string) => CliInvocation | null;
 }
@@ -226,6 +228,18 @@ export function createBridgeMiddleware(options: BridgeOptions) {
     if (!check.ok) return sendJson(res, check.status, { error: check.error });
 
     try {
+      if (options.disableCli && pathname.startsWith("/api/cli/")) {
+        if (pathname === "/api/cli/status") {
+          return sendJson(res, 200, {
+            antigravity: { available: false, path: null },
+            claude: { available: false, path: null },
+            disabled: true,
+          });
+        }
+        return sendJson(res, 403, {
+          error: "Cầu nối CLI bị tắt trên server. Hãy nhập API Key trong phần Cài đặt AI Engine.",
+        });
+      }
       if (pathname === "/api/cli/status" && req.method === "GET") {
         const agy = findExecutable(["agy"]);
         const claude = findExecutable(["claude"]);

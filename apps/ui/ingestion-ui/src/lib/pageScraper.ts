@@ -1,6 +1,7 @@
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 import { bridgeFetch } from './bridgeClient';
+import { DEFAULT_FIRECRAWL_BASE_URL, scrape } from './firecrawlClient';
 // Phần giao diện không thuộc nội dung bài viết.
 const NOISE_SELECTORS = [
   "script",
@@ -103,12 +104,12 @@ export function convertHtmlToMarkdown(html: string, baseUrl: string): string {
 /**
  * Universal page markdown fetcher with multi-tier fallback:
  * 1. Node.js Proxy fetch (/api/proxy/fetch-html) + HTML-to-Markdown
- * 2. Firecrawl Scrape API (/v1/scrape)
+ * 2. Firecrawl Scrape API (/v2/scrape)
  * 3. Browser direct fetch
  */
 export async function scrapePageMarkdown(
   url: string,
-  firecrawlApiUrl: string = 'http://localhost:3002',
+  firecrawlApiUrl: string = DEFAULT_FIRECRAWL_BASE_URL,
   apiKey: string = '',
   signal?: AbortSignal
 ): Promise<string> {
@@ -129,28 +130,16 @@ export async function scrapePageMarkdown(
     console.warn('Proxy fetch failed for page, trying Firecrawl API...', e);
   }
 
-  // Strategy 2: Firecrawl Scrape API
+  // Strategy 2: Firecrawl Scrape API (v2)
   try {
-    const scrapeRes = await fetch(`${firecrawlApiUrl}/v1/scrape`, {
-      method: 'POST',
+    const data = await scrape({ baseUrl: firecrawlApiUrl, apiKey }, url, {
+      formats: ['markdown'],
+      onlyMainContent: true,
       signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        url,
-        formats: ['markdown'],
-        onlyMainContent: true,
-      }),
     });
-
-    if (scrapeRes.ok) {
-      const scrapeJson = await scrapeRes.json();
-      const rawMarkdown = scrapeJson?.data?.markdown || '';
-      if (rawMarkdown && rawMarkdown.length > 50) {
-        return rawMarkdown;
-      }
+    const rawMarkdown = data.markdown || '';
+    if (rawMarkdown.length > 50) {
+      return rawMarkdown;
     }
   } catch (e) {
     if (signal?.aborted) throw e;
