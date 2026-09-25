@@ -37,9 +37,10 @@ import {
 } from "@/lib/aiEngines";
 import { formatExtractToMarkdown } from "@/lib/markdownFormatter";
 
-//! Dynamic API URL fallback to local Firecrawl instance
+//! Dynamic API URL fallback to current host or local instance
 const FIRECRAWL_API_URL =
-  (import.meta as any).env?.VITE_FIRECRAWL_API_URL || "http://localhost:3002";
+  (import.meta as any).env?.VITE_FIRECRAWL_API_URL ||
+  (typeof window !== "undefined" && window.location.origin ? window.location.origin : "http://localhost:3002");
 const FIRECRAWL_API_KEY =
   (import.meta as any).env?.VITE_FIRECRAWL_API_KEY || "";
 

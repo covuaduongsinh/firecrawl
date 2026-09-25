@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { DocCategory } from './docTreeScanner';
+import { DocCategory, DocItem } from './docTreeScanner';
 
 /**
  * Trigger file download in browser
@@ -28,6 +28,45 @@ function slugify(text: string): string {
 }
 
 /**
+ * Clean article markdown body when embedding inside a merged book
+ * Removes duplicate top-level `# H1` and redundant metadata lines
+ */
+function cleanArticleBodyForBook(rawContent: string): string {
+  if (!rawContent) return '';
+  let content = rawContent.trim();
+
+  // Bỏ dòng tiêu đề H1 đầu tiên nếu có (ví dụ: `# Introduction` hoặc `# Tài Liệu...`)
+  content = content.replace(/^#\s+[^\n]+\n+/, '');
+
+  // Bỏ khối metadata trích dẫn đầu bài nếu có (`> 📅 ...\n> 🔗 ...\n\n---\n\n`)
+  content = content.replace(/^(?:>[^\n]*\n*)+(?:---\n*)?/, '');
+
+  return content.trim();
+}
+
+/**
+ * Clean article for single standalone file in ZIP
+ * Ensures a single clean H1 header and metadata block
+ */
+function formatStandaloneArticleMarkdown(item: DocItem, categoryName: string): string {
+  let content = (item.markdownOutput || JSON.stringify(item.extractedData, null, 2)).trim();
+
+  // Nếu nội dung đã bắt đầu bằng `# ` (đã có tiêu đề H1 chuẩn)
+  if (content.startsWith('# ')) {
+    return content;
+  }
+
+  const fileHeader = [
+    `# ${item.title}`,
+    `> **Chuyên mục:** ${categoryName} | **Nguồn:** [${item.url}](${item.url})`,
+    `> **Thời gian:** ${new Date().toLocaleString('vi-VN')}`,
+    `\n---\n\n`,
+  ].join('\n');
+
+  return fileHeader + content;
+}
+
+/**
  * Export all extracted articles into a structured ZIP file
  */
 export async function exportToZip(
@@ -38,14 +77,14 @@ export async function exportToZip(
   let categoryIndex = 1;
   const tocLines: string[] = [];
 
-  tocLines.push(`# ${docTitle} - Mục Lục Toàn Bộ Tài Liệu`);
+  tocLines.push(`# 📚 ${docTitle} - Mục Lục Toàn Bộ Tài Liệu`);
   tocLines.push(`> Ngày tạo: ${new Date().toLocaleString('vi-VN')}`);
-  tocLines.push(`> Được trích xuất và dịch tự động bởi Firecrawl Ingestion & AI Engine\n`);
+  tocLines.push(`> Được trích xuất và dịch tự động bởi Firecrawl Batch Crawler & AI Engine\n`);
   tocLines.push(`## Danh Sách Chuyên Mục & Bài Viết:\n`);
 
   for (const cat of categories) {
     const activeItems = cat.items.filter(
-      item => item.selected && (item.markdownOutput || item.extractedData)
+      (item) => item.selected && (item.markdownOutput || item.extractedData)
     );
     if (activeItems.length === 0) continue;
 
@@ -61,16 +100,8 @@ export async function exportToZip(
       const itemFileName = `${itemPrefix}-${item.slug || slugify(item.title)}.md`;
       const itemRelativePath = `${catFolderName}/${itemFileName}`;
 
-      const content = item.markdownOutput || JSON.stringify(item.extractedData, null, 2);
-      
-      const fileHeader = [
-        `# ${item.title}`,
-        `> **Chuyên mục:** ${cat.name} | **Nguồn:** [${item.url}](${item.url})`,
-        `> **Thời gian:** ${new Date().toLocaleString('vi-VN')}`,
-        `\n---\n\n`,
-      ].join('\n');
-
-      catFolder?.file(itemFileName, fileHeader + content);
+      const finalContent = formatStandaloneArticleMarkdown(item, cat.name);
+      catFolder?.file(itemFileName, finalContent);
 
       tocLines.push(`- [${item.title}](./${itemRelativePath})`);
       itemIndex++;
@@ -111,7 +142,7 @@ export function exportToMergedMarkdown(
   let catIdx = 1;
   for (const cat of categories) {
     const activeItems = cat.items.filter(
-      item => item.selected && (item.markdownOutput || item.extractedData)
+      (item) => item.selected && (item.markdownOutput || item.extractedData)
     );
     if (activeItems.length === 0) continue;
 
@@ -133,7 +164,7 @@ export function exportToMergedMarkdown(
   catIdx = 1;
   for (const cat of categories) {
     const activeItems = cat.items.filter(
-      item => item.selected && (item.markdownOutput || item.extractedData)
+      (item) => item.selected && (item.markdownOutput || item.extractedData)
     );
     if (activeItems.length === 0) continue;
 
@@ -146,8 +177,9 @@ export function exportToMergedMarkdown(
       lines.push(`\n## <a id="${itemAnchor}"></a> ${catIdx}.${itemIdx} ${item.title}`);
       lines.push(`> 🔗 **Nguồn gốc:** [${item.url}](${item.url})\n`);
 
-      const content = item.markdownOutput || JSON.stringify(item.extractedData, null, 2);
-      lines.push(content);
+      const raw = item.markdownOutput || JSON.stringify(item.extractedData, null, 2);
+      const cleanContent = cleanArticleBodyForBook(raw);
+      lines.push(cleanContent);
       lines.push(`\n---\n`);
       itemIdx++;
     }
@@ -188,4 +220,102 @@ export function exportToBatchJson(
   });
   const filename = `${slugify(docTitle)}-batch-extracted-${new Date().toISOString().slice(0, 10)}.json`;
   triggerBlobDownload(blob, filename);
+}
+
+/**
+ * Export a single category's extracted articles into a ZIP package
+ */
+export async function exportCategoryToZip(
+  category: DocCategory,
+  catIndex: number = 1,
+  docTitle: string = 'Documentation'
+): Promise<boolean> {
+  const activeItems = category.items.filter(
+    (item) => item.selected !== false && (item.markdownOutput || item.extractedData)
+  );
+  if (activeItems.length === 0) return false;
+
+  const zip = new JSZip();
+  const catPrefix = String(catIndex).padStart(2, '0');
+  const catSlug = category.slug || slugify(category.name);
+  const catFolderName = `${catPrefix}-${catSlug}`;
+  const catFolder = zip.folder(catFolderName);
+
+  const tocLines: string[] = [
+    `# 📁 Chuyên mục ${catIndex}: ${category.name}`,
+    `> **Thuộc tài liệu:** ${docTitle}`,
+    `> **Tổng số bài đã dịch:** ${activeItems.length} bài`,
+    `> **Thời gian xuất:** ${new Date().toLocaleString('vi-VN')}\n`,
+    `## Danh sách bài viết:\n`,
+  ];
+
+  let itemIndex = 1;
+  for (const item of activeItems) {
+    const itemPrefix = String(itemIndex).padStart(2, '0');
+    const itemFileName = `${itemPrefix}-${item.slug || slugify(item.title)}.md`;
+
+    const finalContent = formatStandaloneArticleMarkdown(item, category.name);
+    catFolder?.file(itemFileName, finalContent);
+
+    tocLines.push(`${itemIndex}. [${item.title}](./${itemFileName}) - [Link gốc](${item.url})`);
+    itemIndex++;
+  }
+
+  zip.file('README.md', tocLines.join('\n'));
+
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const filename = `${catPrefix}-${catSlug}-${slugify(docTitle)}-${new Date().toISOString().slice(0, 10)}.zip`;
+  triggerBlobDownload(blob, filename);
+  return true;
+}
+
+/**
+ * Export a single category into a merged Markdown document
+ */
+export function exportCategoryToMergedMarkdown(
+  category: DocCategory,
+  catIndex: number = 1,
+  docTitle: string = 'Documentation'
+): boolean {
+  const activeItems = category.items.filter(
+    (item) => item.selected !== false && (item.markdownOutput || item.extractedData)
+  );
+  if (activeItems.length === 0) return false;
+
+  const lines: string[] = [
+    `# 📁 ${category.name.toUpperCase()}`,
+    `> **Tài liệu:** ${docTitle} | **Chuyên mục:** #${catIndex}`,
+    `> **Tổng số bài:** ${activeItems.length} bài | **Thời gian:** ${new Date().toLocaleString('vi-VN')}\n`,
+    `---\n`,
+    `## 📑 Mục Lục Chuyên Mục\n`,
+  ];
+
+  let itemIdx = 1;
+  for (const item of activeItems) {
+    const anchor = `bai-${itemIdx}-${slugify(item.title)}`;
+    lines.push(`- [${itemIdx}. ${item.title}](#${anchor})`);
+    itemIdx++;
+  }
+
+  lines.push(`\n---\n`);
+
+  itemIdx = 1;
+  for (const item of activeItems) {
+    const anchor = `bai-${itemIdx}-${slugify(item.title)}`;
+    lines.push(`\n## <a id="${anchor}"></a> ${itemIdx}. ${item.title}`);
+    lines.push(`> 🔗 **Nguồn gốc:** [${item.url}](${item.url})\n`);
+
+    const raw = item.markdownOutput || JSON.stringify(item.extractedData, null, 2);
+    const cleanContent = cleanArticleBodyForBook(raw);
+    lines.push(cleanContent);
+    lines.push(`\n---\n`);
+    itemIdx++;
+  }
+
+  const catPrefix = String(catIndex).padStart(2, '0');
+  const catSlug = category.slug || slugify(category.name);
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+  const filename = `${catPrefix}-${catSlug}-${slugify(docTitle)}.md`;
+  triggerBlobDownload(blob, filename);
+  return true;
 }

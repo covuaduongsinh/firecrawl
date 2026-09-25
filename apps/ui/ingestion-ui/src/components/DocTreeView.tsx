@@ -17,6 +17,9 @@ import {
   AlertCircle,
   Loader2,
   Sparkles,
+  Download,
+  FileArchive,
+  BookOpen,
   ExternalLink,
 } from 'lucide-react';
 
@@ -26,6 +29,9 @@ interface DocTreeViewProps {
   activeItemId?: string;
   onSelectItem?: (item: DocItem) => void;
   isProcessing?: boolean;
+  onExportCategoryZip?: (category: DocCategory, catIndex: number) => void;
+  onExportCategoryMd?: (category: DocCategory, catIndex: number) => void;
+  downloadedCategorySlugs?: Set<string>;
 }
 
 export default function DocTreeView({
@@ -34,6 +40,9 @@ export default function DocTreeView({
   activeItemId,
   onSelectItem,
   isProcessing = false,
+  onExportCategoryZip,
+  onExportCategoryMd,
+  downloadedCategorySlugs,
 }: DocTreeViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
@@ -197,6 +206,12 @@ export default function DocTreeView({
             const isAllCatSelected = catSelectedCount === cat.items.length && cat.items.length > 0;
             const isSomeCatSelected = catSelectedCount > 0 && !isAllCatSelected;
 
+            const catDoneCount = cat.items.filter(
+              (i) => i.status === 'done' || (i.markdownOutput && i.markdownOutput.length > 0)
+            ).length;
+            const isAutoDownloaded = downloadedCategorySlugs?.has(cat.slug);
+            const originalCatIndex = categories.findIndex((c) => c.slug === cat.slug) + 1;
+
             return (
               <div
                 key={cat.slug}
@@ -204,11 +219,11 @@ export default function DocTreeView({
               >
                 {/* Category Header */}
                 <div className="flex items-center justify-between px-3.5 py-2.5 bg-slate-850 hover:bg-slate-800/80 transition-colors border-b border-slate-800">
-                  <div className="flex items-center space-x-2.5">
+                  <div className="flex items-center space-x-2.5 flex-1 min-w-0">
                     <button
                       type="button"
                       onClick={() => toggleCollapse(cat.slug)}
-                      className="p-1 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-200 transition"
+                      className="p-1 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-200 transition flex-shrink-0"
                     >
                       {isCollapsed ? (
                         <ChevronRight className="h-4 w-4" />
@@ -223,25 +238,84 @@ export default function DocTreeView({
                         toggleCategory(cat.slug, checked === true)
                       }
                       disabled={isProcessing}
-                      className="border-slate-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+                      className="border-slate-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600 flex-shrink-0"
                     />
 
                     <div
-                      className="flex items-center space-x-2 cursor-pointer select-none"
+                      className="flex items-center space-x-2 cursor-pointer select-none truncate flex-1"
                       onClick={() => toggleCollapse(cat.slug)}
                     >
                       {isCollapsed ? (
-                        <Folder className="h-4 w-4 text-amber-400" />
+                        <Folder className="h-4 w-4 text-amber-400 flex-shrink-0" />
                       ) : (
-                        <FolderOpen className="h-4 w-4 text-amber-400" />
+                        <FolderOpen className="h-4 w-4 text-amber-400 flex-shrink-0" />
                       )}
-                      <span className="font-semibold text-slate-200 text-sm">
+                      <span className="font-semibold text-slate-200 text-sm truncate">
                         {cat.name}
                       </span>
-                      <span className="text-xs text-slate-500 font-normal">
+                      <span className="text-xs text-slate-500 font-normal flex-shrink-0">
                         ({catSelectedCount}/{cat.items.length})
                       </span>
                     </div>
+                  </div>
+
+                  {/* Category Right Status & Quick Download Actions */}
+                  <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
+                    {catDoneCount > 0 && (
+                      <span
+                        className={`text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center space-x-1 ${
+                          catDoneCount === cat.items.length
+                            ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/80'
+                            : 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/70'
+                        }`}
+                      >
+                        <CheckCircle2 className="h-3 w-3 mr-1 text-emerald-400" />
+                        <span>{catDoneCount}/{cat.items.length} bài</span>
+                      </span>
+                    )}
+
+                    {isAutoDownloaded && (
+                      <span
+                        className="text-[10px] bg-amber-950/70 text-amber-300 border border-amber-700/80 px-2 py-0.5 rounded-full font-medium flex items-center"
+                        title="Chuyên mục này đã được tự động tải về máy khi hoàn thành"
+                      >
+                        ✓ Đã tự động tải
+                      </span>
+                    )}
+
+                    {/* Quick Manual Download Buttons for Category */}
+                    {catDoneCount > 0 && (
+                      <div className="flex items-center space-x-1 pl-1 border-l border-slate-700">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onExportCategoryZip?.(cat, originalCatIndex);
+                          }}
+                          className="h-7 px-2 text-[11px] bg-slate-800 hover:bg-emerald-950/80 hover:text-emerald-300 text-slate-300 border border-slate-700"
+                          title={`Tải file ZIP cho riêng chuyên mục "${cat.name}" (${catDoneCount} bài đã dịch)`}
+                        >
+                          <FileArchive className="h-3.5 w-3.5 mr-1 text-amber-400" />
+                          Tải ZIP
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onExportCategoryMd?.(cat, originalCatIndex);
+                          }}
+                          className="h-7 px-2 text-[11px] bg-slate-800 hover:bg-cyan-950/80 hover:text-cyan-300 text-slate-300 border border-slate-700"
+                          title={`Tải file Markdown gộp cho riêng chuyên mục "${cat.name}"`}
+                        >
+                          <BookOpen className="h-3.5 w-3.5 mr-1 text-cyan-400" />
+                          Tải MD
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
