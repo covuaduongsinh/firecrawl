@@ -1,45 +1,46 @@
-# Firecrawl - AI & Assistant System Guide
+Firecrawl is a web scraper API. The directory you have access to is a monorepo:
+ - `apps/api` has the actual API and worker code (runs on `http://localhost:3002`)
+ - `apps/*-sdk` are various SDKs
+ - `apps/playwright-service-ts` is the headless Chromium microservice
+ - `apps/ui/ingestion-ui` is the React/Vite web UI (runs on `http://localhost:5173`) — see below
+ - `skills/` holds the Firecrawl skills for coding agents
 
-You are assisting with the **Firecrawl** project — a high-performance, open-source web data extraction and scraping platform built for AI/LLM applications, RAG systems, and autonomous agents.
+When making changes to the API, here are the general steps you should take:
+1. Write some end-to-end tests that assert your win conditions, if they don't already exist
+  - 1 happy path (more is encouraged if there are multiple happy paths with significantly different code paths taken)
+  - 1+ failure path(s)
+  - Generally, E2E (called `snips` in the API) is always preferred over unit testing.
+  - In the API, always use `scrapeTimeout` from `./lib` to set the timeout you use for scrapes.
+  - These tests will be ran on a variety of configurations. You should gate tests in the following manner:
+    - If it requires fire-engine: `!process.env.TEST_SUITE_SELF_HOSTED`
+    - If it requires AI: `!process.env.TEST_SUITE_SELF_HOSTED || process.env.OPENAI_API_KEY || process.env.OLLAMA_BASE_URL`
+2. Write code to achieve your win conditions
+3. Run your tests using `pnpm harness jest ...`
+  - `pnpm harness` is a command that gets the API server and workers up for you to run the tests. Don't try to `pnpm start` manually.
+  - The full test suite takes a long time to run, so you should try to only execute the relevant tests locally, and let CI run the full test suite.
+4. Push to a branch, open a PR, and let CI run to verify your win condition.
+Keep these steps in mind while building your TODO list.
 
----
+Never bypass `knip` failures (e.g. with `git commit --no-verify`). If the pre-commit `knip` check fails, fix the reported unused exports/files — even if they predate your change — before committing.
 
-## 1. Project Structure & Architecture
+## Fork conventions (Dương Sinh)
 
-Firecrawl is structured as a TypeScript/Node.js monorepo:
-- **`apps/api`**: Core REST API, job schedulers, NuQ distributed queue, and worker services (runs on `http://localhost:3002`).
-- **`apps/playwright-service-ts`**: Headless browser Chromium microservice (Playwright) for dynamic JS rendering and browser actions.
-- **`apps/ui/ingestion-ui`**: React/Vite/Tailwind Web Dashboard (runs on `http://localhost:5173`).
-- **`apps/nuq-postgres`**: PostgreSQL schema & extensions for high-throughput distributed queues.
-- **`apps/*-sdk`**: Official client SDKs in Python, TypeScript/JS, Go, Rust, Java, .NET, PHP, Ruby, Elixir.
-- **`.claude/skills/`**: Firecrawl-native skills for Claude Code and Antigravity CLI agents.
+- Put implementation and documentation plans in `docs/plans/YYYY-MM-DD-<topic>.md`.
+- Run the full stack with `docker compose up -d`.
+- Keep fork-specific changes inside `apps/ui/ingestion-ui` where possible, so syncing with upstream stays conflict-free.
 
----
+### `apps/ui/ingestion-ui`
 
-## 2. Global Rules & Guidelines
+- Before pushing, run `pnpm build`, `pnpm test` and `pnpm lint` in `apps/ui/ingestion-ui`. `vite dev` does not typecheck, so only `pnpm build` catches type errors.
+- Pure logic lives in `src/lib/*` and is covered by `*.test.ts` files (vitest + jsdom). Add a test there for every bug fix.
+- The UI reaches the Firecrawl API (v2) only through `src/lib/firecrawlClient.ts` and the `/firecrawl` proxy (Vite dev proxy; `bridge/server.ts` in production, which adds the API key server-side). Never bake API keys into the bundle.
+- Production = `bridge/server.ts` bundled by `pnpm build:server` into the Docker image (`Dockerfile`, compose profile `ui`). CLI endpoints are disabled there. Deployment steps: `docs/deploy-ingestion-ui.md`.
+- The local bridge (`bridge/`) serves `/api/cli/*` and `/api/proxy/*` during `vite dev`. It runs the `claude`/`agy` CLIs and fetches arbitrary URLs, so every request must pass `bridge/security.ts` checks (loopback Host, same Origin, session token). Never add a CLI flag that grants tool or permission bypass (e.g. `--dangerously-skip-permissions`): prompts contain scraped web content.
 
-1. **Plans Directory Rule:**
-   - Always place implementation plans and documentation plans in `/docs/plans/` (e.g. `docs/plans/YYYY-MM-DD-<topic>.md`).
-2. **Local Endpoints:**
-   - **Backend API:** `http://localhost:3002`
-   - **Frontend Web UI:** `http://localhost:5173`
-3. **Running the Stack:**
-   - Use Docker Compose: `docker compose up -d`
-   - Use `pnpm harness` for API local development/testing. Do not try to `pnpm start` manually without harness.
-4. **Code Quality & Verification:**
-   - Never bypass `knip` failures (e.g. with `git commit --no-verify`).
-   - E2E tests (`snips` in `apps/api/src/__tests__/snips/`) are preferred over unit tests.
-   - Test timeout: Always use `scrapeTimeout` from `./lib` in `apps/api`.
-   - Test gating:
-     - If it requires fire-engine: `!process.env.TEST_SUITE_SELF_HOSTED`
-     - If it requires AI: `!process.env.TEST_SUITE_SELF_HOSTED || process.env.OPENAI_API_KEY || process.env.OLLAMA_BASE_URL`
+## MCP
 
----
+To use the Firecrawl MCP server with a local stack, create a `.mcp.json` (gitignored) at the repo root:
 
-## 3. Model Context Protocol (MCP) Integration
-
-Firecrawl provides a native MCP server for Claude Code, Antigravity CLI, Cursor, and other AI tools.
-Configured in `.mcp.json`:
 ```json
 {
   "mcpServers": {
@@ -54,10 +55,3 @@ Configured in `.mcp.json`:
   }
 }
 ```
-
-### Available MCP Tools:
-- **`firecrawl_scrape`**: Scrape a single URL to clean markdown, HTML, or screenshot.
-- **`firecrawl_crawl`**: Asynchronously crawl all sub-pages of a website.
-- **`firecrawl_map`**: Rapidly list all URLs on a domain.
-- **`firecrawl_extract`**: Extract structured data using LLMs and JSON schemas.
-- **`firecrawl_search`**: Search the web and return markdown content for results.

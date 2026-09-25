@@ -1,3 +1,6 @@
+import { bridgeFetch } from './bridgeClient';
+import { DEFAULT_FIRECRAWL_BASE_URL, map, scrape } from './firecrawlClient';
+
 export interface DocItem {
   id: string;
   url: string;
@@ -8,7 +11,7 @@ export interface DocItem {
   depth: number;
   selected: boolean;
   status: 'idle' | 'scraping' | 'translating' | 'done' | 'error';
-  extractedData?: any;
+  extractedData?: unknown;
   markdownOutput?: string;
   error?: string;
 }
@@ -42,7 +45,7 @@ export function normalizeDocUrl(rawUrl: string): string {
     const urlObj = new URL(rawUrl);
     urlObj.hash = '';
     urlObj.search = '';
-    let path = urlObj.pathname.replace(/\/+$/, '');
+    const path = urlObj.pathname.replace(/\/+$/, '');
     return `${urlObj.origin}${path}`;
   } catch {
     return rawUrl.trim();
@@ -198,14 +201,14 @@ export function parseDomSidebar(html: string, pageUrl: string): DocCategory[] {
  */
 export async function scanDocTree(
   rootUrl: string,
-  firecrawlApiUrl: string = 'http://localhost:3002',
+  firecrawlApiUrl: string = DEFAULT_FIRECRAWL_BASE_URL,
   apiKey: string = ''
 ): Promise<DocCategory[]> {
   const cleanRoot = normalizeDocUrl(rootUrl);
 
   // --- Tier 1: Try Direct HTML Proxy Fetch (Vite CLI Bridge) ---
   try {
-    const proxyRes = await fetch(`/api/proxy/fetch-html?url=${encodeURIComponent(cleanRoot)}`);
+    const proxyRes = await bridgeFetch(`/api/proxy/fetch-html?url=${encodeURIComponent(cleanRoot)}`);
     if (proxyRes.ok) {
       const proxyJson = await proxyRes.json();
       if (proxyJson.success && proxyJson.html) {
@@ -219,28 +222,16 @@ export async function scanDocTree(
     console.warn('Proxy fetch HTML failed, trying Firecrawl Scrape rawHtml...', e);
   }
 
+  const firecrawl = { baseUrl: firecrawlApiUrl, apiKey };
+
   // --- Tier 2: Try Firecrawl Scrape with rawHtml format ---
   try {
-    const scrapeRes = await fetch(`${firecrawlApiUrl}/v1/scrape`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        url: cleanRoot,
-        formats: ['rawHtml', 'html'],
-      }),
-    });
-
-    if (scrapeRes.ok) {
-      const scrapeJson = await scrapeRes.json();
-      const rawHtml = scrapeJson?.data?.rawHtml || scrapeJson?.data?.html || '';
-      if (rawHtml) {
-        const domCategories = parseDomSidebar(rawHtml, cleanRoot);
-        if (domCategories.length > 0) {
-          return domCategories;
-        }
+    const data = await scrape(firecrawl, cleanRoot, { formats: ['rawHtml'] });
+    const rawHtml = data.rawHtml || data.html || '';
+    if (rawHtml) {
+      const domCategories = parseDomSidebar(rawHtml, cleanRoot);
+      if (domCategories.length > 0) {
+        return domCategories;
       }
     }
   } catch (e) {
@@ -250,24 +241,7 @@ export async function scanDocTree(
   // --- Tier 3: Fallback to Firecrawl Map API & Path Analysis ---
   let urls: string[] = [];
   try {
-    const mapRes = await fetch(`${firecrawlApiUrl}/v1/map`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        url: cleanRoot,
-        limit: 150,
-      }),
-    });
-
-    if (mapRes.ok) {
-      const mapJson = await mapRes.json();
-      if (mapJson.success && Array.isArray(mapJson.links)) {
-        urls = mapJson.links;
-      }
-    }
+    urls = await map(firecrawl, cleanRoot, { limit: 150 });
   } catch (err) {
     console.warn('Firecrawl map API failed:', err);
   }

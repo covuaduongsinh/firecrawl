@@ -2,6 +2,7 @@ import React, { Component, ErrorInfo, ReactNode } from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import './index.css'
+import { clearAllSessions } from './lib/sessionStore'
 
 interface Props {
   children: ReactNode;
@@ -44,12 +45,14 @@ class ErrorBoundary extends Component<Props, State> {
           </pre>
           <button
             onClick={() => {
-              localStorage.clear();
-              window.location.reload();
+              // Chỉ xóa phiên dịch lưu tạm; giữ API key và ngân hàng prompt.
+              clearAllSessions()
+                .catch((err) => console.error('Không xóa được phiên lưu tạm:', err))
+                .finally(() => window.location.reload());
             }}
             style={{ marginTop: '1rem', padding: '0.5rem 1rem', backgroundColor: '#ef4444', color: 'white', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontWeight: '600' }}
           >
-            Xóa bộ nhớ đệm và Tải lại trang (Clear Cache & Reload)
+            Xóa phiên dịch lưu tạm và Tải lại trang
           </button>
         </div>
       );

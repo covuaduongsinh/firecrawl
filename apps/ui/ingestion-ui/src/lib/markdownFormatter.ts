@@ -2,6 +2,12 @@
  * Module chuyển đổi dữ liệu trích xuất AI thành tài liệu Markdown chuẩn, đẹp mắt, dễ đọc, không trùng lặp.
  */
 
+/**
+ * AI output has no fixed shape (the prompt decides it), so the formatter walks it dynamically.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LooseJson = any;
+
 export interface FormatterOptions {
   title?: string;
   sourceUrl?: string;
@@ -11,27 +17,47 @@ export interface FormatterOptions {
   includeRawJson?: boolean;
 }
 
-// Danh sách các từ khóa giao diện web thừa cần lọc bỏ
-const BOILERPLATE_PHRASES = [
+// Các dòng giao diện web thừa — chỉ lọc khi CẢ DÒNG đúng là cụm này (không lọc đoạn văn có chứa từ đó,
+// ví dụ "Submit Assignment" trong tài liệu Frappe Education phải được giữ lại).
+const BOILERPLATE_EXACT = [
   "was this helpful",
   "nội dung này có hữu ích không",
-  "last updated",
-  "cập nhật lần cuối",
   "edit this page",
   "chỉnh sửa trang này",
   "submit",
-  "thanks!",
-  "cảm ơn!",
+  "gửi",
+  "thanks",
+  "cảm ơn",
   "previous page",
   "next page",
+  "trang trước",
+  "trang sau",
   "on this page",
+  "trên trang này",
 ];
 
-function isBoilerplateText(text: string): boolean {
-  if (!text || typeof text !== "string") return false;
-  const lower = text.trim().toLowerCase();
-  if (lower.length === 0) return true;
-  return BOILERPLATE_PHRASES.some((phrase) => lower.includes(phrase));
+// Các dòng bắt đầu bằng cụm này và ngắn (ví dụ "Last updated on 2 Jan 2024") cũng là boilerplate.
+const BOILERPLATE_PREFIX = ["last updated", "cập nhật lần cuối"];
+const PREFIX_MAX_LENGTH = 60;
+
+function normalizeForBoilerplate(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[*_`>#]+/g, "")
+    .replace(/[?!.:…]+$/u, "")
+    .trim();
+}
+
+export function isBoilerplateText(text: unknown): boolean {
+  if (typeof text !== "string") return false;
+  const normalized = normalizeForBoilerplate(text);
+  if (normalized.length === 0) return false;
+  if (BOILERPLATE_EXACT.includes(normalized)) return true;
+  return (
+    normalized.length <= PREFIX_MAX_LENGTH &&
+    BOILERPLATE_PREFIX.some((prefix) => normalized.startsWith(prefix))
+  );
 }
 
 function cleanMarkdownText(text: string): string {
@@ -48,7 +74,7 @@ function cleanMarkdownText(text: string): string {
 }
 
 export function formatExtractToMarkdown(
-  rawResult: any,
+  rawResult: LooseJson,
   optionsInput: FormatterOptions | string = {}
 ): string {
   if (!rawResult) return "";
@@ -152,7 +178,7 @@ export function formatExtractToMarkdown(
   // Ưu tiên 2: Có mảng `sections` có cấu trúc
   else if (Array.isArray(rootData.sections) && rootData.sections.length > 0) {
     out += `## 📖 Nội Dung Chi Tiết\n\n`;
-    rootData.sections.forEach((sec: any, idx: number) => {
+    rootData.sections.forEach((sec: LooseJson, idx: number) => {
       renderSection(sec, idx + 1);
     });
   }
@@ -196,7 +222,7 @@ export function formatExtractToMarkdown(
   }
 
   // 4. Render mảng câu song ngữ thành Markdown đẹp mắt (Không in JSON thô)
-  function renderBilingualChunks(chunks: any[]) {
+  function renderBilingualChunks(chunks: LooseJson[]) {
     for (const chunk of chunks) {
       if (typeof chunk === "string") {
         if (!isBoilerplateText(chunk)) {
@@ -206,8 +232,8 @@ export function formatExtractToMarkdown(
       }
 
       if (typeof chunk === "object" && chunk !== null) {
-        const orig = chunk.original || chunk.en || chunk.source || "";
-        const vi = chunk.vietnamese || chunk.vi || chunk.translated || chunk.target || "";
+        const orig = String(chunk.original || chunk.en || chunk.source || "");
+        const vi = String(chunk.vietnamese || chunk.vi || chunk.translated || chunk.target || "");
 
         if (isBoilerplateText(orig) || isBoilerplateText(vi)) {
           continue;
@@ -234,7 +260,7 @@ export function formatExtractToMarkdown(
     }
   }
 
-  function renderSection(sec: any, index: number) {
+  function renderSection(sec: LooseJson, index: number) {
     if (!sec || typeof sec !== "object") {
       if (!isBoilerplateText(String(sec))) {
         out += `### Mục ${index}\n\n${sec}\n\n`;
@@ -293,7 +319,7 @@ export function formatExtractToMarkdown(
     out += `\n`;
   }
 
-  function renderListItems(items: any[]) {
+  function renderListItems(items: LooseJson[]) {
     items.forEach((item) => {
       if (typeof item === "string" || typeof item === "number") {
         if (!isBoilerplateText(String(item))) {
@@ -331,7 +357,7 @@ export function formatExtractToMarkdown(
     out += `\n`;
   }
 
-  function renderGenericField(key: string, val: any, depth = 2) {
+  function renderGenericField(key: string, val: LooseJson, depth = 2) {
     if (val === null || val === undefined) return;
 
     const readableTitle = key

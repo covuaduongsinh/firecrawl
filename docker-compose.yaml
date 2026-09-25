@@ -127,6 +127,29 @@ services:
     mem_limit: 8G
     memswap_limit: 8G
 
+  # Web UI (Dương Sinh fork). Opt-in: docker compose --profile ui up -d
+  # See docs/deploy-ingestion-ui.md before exposing it on a server.
+  ingestion-ui:
+    profiles: ["ui"]
+    build: apps/ui/ingestion-ui
+    environment:
+      FIRECRAWL_API_URL: http://api:${INTERNAL_PORT:-3002}
+      FIRECRAWL_API_KEY: ${UI_FIRECRAWL_API_KEY:-}
+      UI_BASIC_AUTH: ${UI_BASIC_AUTH:-}
+      BRIDGE_ALLOWED_HOSTS: ${UI_DOMAIN:-}
+    depends_on:
+      - api
+    networks:
+      - backend
+    ports:
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-5173}:3006"
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   redis:
     # NOTE: If you want to use Valkey (open source) instead of Redis (source available),
     # uncomment the Valkey statement and comment out the Redis statement.

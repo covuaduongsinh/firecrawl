@@ -35,6 +35,9 @@ function cleanArticleBodyForBook(rawContent: string): string {
   if (!rawContent) return '';
   let content = rawContent.trim();
 
+  // Bỏ YAML frontmatter nếu có
+  content = content.replace(/^---\n[\s\S]*?\n---\n+/, '');
+
   // Bỏ dòng tiêu đề H1 đầu tiên nếu có (ví dụ: `# Introduction` hoặc `# Tài Liệu...`)
   content = content.replace(/^#\s+[^\n]+\n+/, '');
 
@@ -44,12 +47,62 @@ function cleanArticleBodyForBook(rawContent: string): string {
   return content.trim();
 }
 
+export type ExportFlavor = 'standard' | 'obsidian';
+
+/** File/folder name part that is safe on Windows, macOS and Linux. */
+export function safeFileSlug(text: string, fallback = 'bai-viet'): string {
+  return slugify(text || '').slice(0, 80).replace(/-+$/, '') || fallback;
+}
+
+function articleFileName(item: DocItem, index: number): string {
+  return `${String(index).padStart(2, '0')}-${safeFileSlug(item.slug || item.title)}.md`;
+}
+
+function categoryFolderName(category: DocCategory, index: number): string {
+  return `${String(index).padStart(2, '0')}-${safeFileSlug(category.slug || category.name, 'chuyen-muc')}`;
+}
+
+function articleContent(item: DocItem): string {
+  return (item.markdownOutput || JSON.stringify(item.extractedData, null, 2) || '').trim();
+}
+
+/** YAML double-quoted scalar (JSON strings are valid YAML). */
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+/**
+ * Obsidian note: YAML frontmatter holds the metadata (searchable with Dataview),
+ * followed by a single H1 and the article body.
+ */
+export function formatObsidianNote(item: DocItem, categoryName: string, now = new Date()): string {
+  const frontmatter = [
+    '---',
+    `title: ${yamlString(item.title)}`,
+    `source: ${yamlString(item.url)}`,
+    `category: ${yamlString(categoryName)}`,
+    `created: ${now.toISOString().slice(0, 10)}`,
+    'tags:',
+    '  - firecrawl',
+    `  - ${safeFileSlug(categoryName, 'chuyen-muc')}`,
+    '---',
+    '',
+  ].join('\n');
+  return `${frontmatter}# ${item.title}\n\n${cleanArticleBodyForBook(articleContent(item))}\n`;
+}
+
 /**
  * Clean article for single standalone file in ZIP
  * Ensures a single clean H1 header and metadata block
  */
-function formatStandaloneArticleMarkdown(item: DocItem, categoryName: string): string {
-  let content = (item.markdownOutput || JSON.stringify(item.extractedData, null, 2)).trim();
+function formatStandaloneArticleMarkdown(
+  item: DocItem,
+  categoryName: string,
+  flavor: ExportFlavor = 'standard'
+): string {
+  if (flavor === 'obsidian') return formatObsidianNote(item, categoryName);
+
+  const content = articleContent(item);
 
   // Nếu nội dung đã bắt đầu bằng `# ` (đã có tiêu đề H1 chuẩn)
   if (content.startsWith('# ')) {
@@ -66,12 +119,23 @@ function formatStandaloneArticleMarkdown(item: DocItem, categoryName: string): s
   return fileHeader + content;
 }
 
+/** Heading with an explicit anchor for standard Markdown viewers; plain heading for Obsidian. */
+function anchoredHeading(level: string, anchor: string, text: string, flavor: ExportFlavor): string {
+  return flavor === 'obsidian' ? `${level} ${text}` : `${level} <a id="${anchor}"></a> ${text}`;
+}
+
+/** TOC link to a heading: `[[#Heading|label]]` in Obsidian, `[label](#anchor)` elsewhere. */
+function tocLink(label: string, anchor: string, headingText: string, flavor: ExportFlavor): string {
+  return flavor === 'obsidian' ? `[[#${headingText.replace(/[[\]#|^]/g, ' ').trim()}|${label}]]` : `[${label}](#${anchor})`;
+}
+
 /**
  * Export all extracted articles into a structured ZIP file
  */
 export async function exportToZip(
   categories: DocCategory[],
-  docTitle: string = 'Documentation'
+  docTitle: string = 'Documentation',
+  flavor: ExportFlavor = 'standard'
 ): Promise<void> {
   const zip = new JSZip();
   let categoryIndex = 1;
@@ -88,19 +152,17 @@ export async function exportToZip(
     );
     if (activeItems.length === 0) continue;
 
-    const catFolderPrefix = String(categoryIndex).padStart(2, '0');
-    const catFolderName = `${catFolderPrefix}-${cat.slug || slugify(cat.name)}`;
+    const catFolderName = categoryFolderName(cat, categoryIndex);
     const catFolder = zip.folder(catFolderName);
 
     tocLines.push(`### ${categoryIndex}. ${cat.name}`);
 
     let itemIndex = 1;
     for (const item of activeItems) {
-      const itemPrefix = String(itemIndex).padStart(2, '0');
-      const itemFileName = `${itemPrefix}-${item.slug || slugify(item.title)}.md`;
+      const itemFileName = articleFileName(item, itemIndex);
       const itemRelativePath = `${catFolderName}/${itemFileName}`;
 
-      const finalContent = formatStandaloneArticleMarkdown(item, cat.name);
+      const finalContent = formatStandaloneArticleMarkdown(item, cat.name, flavor);
       catFolder?.file(itemFileName, finalContent);
 
       tocLines.push(`- [${item.title}](./${itemRelativePath})`);
@@ -126,7 +188,8 @@ export async function exportToZip(
  */
 export function exportToMergedMarkdown(
   categories: DocCategory[],
-  docTitle: string = 'Documentation'
+  docTitle: string = 'Documentation',
+  flavor: ExportFlavor = 'standard'
 ): void {
   const lines: string[] = [];
 
@@ -147,12 +210,13 @@ export function exportToMergedMarkdown(
     if (activeItems.length === 0) continue;
 
     const catAnchor = `chuong-${catIdx}-${slugify(cat.name)}`;
-    lines.push(`- [**${catIdx}. ${cat.name}**](#${catAnchor})`);
+    lines.push(`- ${tocLink(`**${catIdx}. ${cat.name}**`, catAnchor, `${catIdx}. ${cat.name.toUpperCase()}`, flavor)}`);
 
     let itemIdx = 1;
     for (const item of activeItems) {
       const itemAnchor = `muc-${catIdx}-${itemIdx}-${slugify(item.title)}`;
-      lines.push(`  - [${catIdx}.${itemIdx} ${item.title}](#${itemAnchor})`);
+      const itemHeading = `${catIdx}.${itemIdx} ${item.title}`;
+      lines.push(`  - ${tocLink(itemHeading, itemAnchor, itemHeading, flavor)}`);
       itemIdx++;
     }
     catIdx++;
@@ -169,12 +233,12 @@ export function exportToMergedMarkdown(
     if (activeItems.length === 0) continue;
 
     const catAnchor = `chuong-${catIdx}-${slugify(cat.name)}`;
-    lines.push(`\n# <a id="${catAnchor}"></a> ${catIdx}. ${cat.name.toUpperCase()}\n`);
+    lines.push(`\n${anchoredHeading('#', catAnchor, `${catIdx}. ${cat.name.toUpperCase()}`, flavor)}\n`);
 
     let itemIdx = 1;
     for (const item of activeItems) {
       const itemAnchor = `muc-${catIdx}-${itemIdx}-${slugify(item.title)}`;
-      lines.push(`\n## <a id="${itemAnchor}"></a> ${catIdx}.${itemIdx} ${item.title}`);
+      lines.push(`\n${anchoredHeading('##', itemAnchor, `${catIdx}.${itemIdx} ${item.title}`, flavor)}`);
       lines.push(`> 🔗 **Nguồn gốc:** [${item.url}](${item.url})\n`);
 
       const raw = item.markdownOutput || JSON.stringify(item.extractedData, null, 2);
@@ -198,7 +262,7 @@ export function exportToBatchJson(
   categories: DocCategory[],
   docTitle: string = 'Documentation'
 ): void {
-  const outputData: any[] = [];
+  const outputData: Record<string, unknown>[] = [];
 
   for (const cat of categories) {
     for (const item of cat.items) {
@@ -228,7 +292,8 @@ export function exportToBatchJson(
 export async function exportCategoryToZip(
   category: DocCategory,
   catIndex: number = 1,
-  docTitle: string = 'Documentation'
+  docTitle: string = 'Documentation',
+  flavor: ExportFlavor = 'standard'
 ): Promise<boolean> {
   const activeItems = category.items.filter(
     (item) => item.selected !== false && (item.markdownOutput || item.extractedData)
@@ -237,8 +302,8 @@ export async function exportCategoryToZip(
 
   const zip = new JSZip();
   const catPrefix = String(catIndex).padStart(2, '0');
-  const catSlug = category.slug || slugify(category.name);
-  const catFolderName = `${catPrefix}-${catSlug}`;
+  const catSlug = safeFileSlug(category.slug || category.name, 'chuyen-muc');
+  const catFolderName = categoryFolderName(category, catIndex);
   const catFolder = zip.folder(catFolderName);
 
   const tocLines: string[] = [
@@ -251,10 +316,9 @@ export async function exportCategoryToZip(
 
   let itemIndex = 1;
   for (const item of activeItems) {
-    const itemPrefix = String(itemIndex).padStart(2, '0');
-    const itemFileName = `${itemPrefix}-${item.slug || slugify(item.title)}.md`;
+    const itemFileName = articleFileName(item, itemIndex);
 
-    const finalContent = formatStandaloneArticleMarkdown(item, category.name);
+    const finalContent = formatStandaloneArticleMarkdown(item, category.name, flavor);
     catFolder?.file(itemFileName, finalContent);
 
     tocLines.push(`${itemIndex}. [${item.title}](./${itemFileName}) - [Link gốc](${item.url})`);
@@ -275,7 +339,8 @@ export async function exportCategoryToZip(
 export function exportCategoryToMergedMarkdown(
   category: DocCategory,
   catIndex: number = 1,
-  docTitle: string = 'Documentation'
+  docTitle: string = 'Documentation',
+  flavor: ExportFlavor = 'standard'
 ): boolean {
   const activeItems = category.items.filter(
     (item) => item.selected !== false && (item.markdownOutput || item.extractedData)
@@ -293,7 +358,8 @@ export function exportCategoryToMergedMarkdown(
   let itemIdx = 1;
   for (const item of activeItems) {
     const anchor = `bai-${itemIdx}-${slugify(item.title)}`;
-    lines.push(`- [${itemIdx}. ${item.title}](#${anchor})`);
+    const heading = `${itemIdx}. ${item.title}`;
+    lines.push(`- ${tocLink(heading, anchor, heading, flavor)}`);
     itemIdx++;
   }
 
@@ -302,7 +368,7 @@ export function exportCategoryToMergedMarkdown(
   itemIdx = 1;
   for (const item of activeItems) {
     const anchor = `bai-${itemIdx}-${slugify(item.title)}`;
-    lines.push(`\n## <a id="${anchor}"></a> ${itemIdx}. ${item.title}`);
+    lines.push(`\n${anchoredHeading('##', anchor, `${itemIdx}. ${item.title}`, flavor)}`);
     lines.push(`> 🔗 **Nguồn gốc:** [${item.url}](${item.url})\n`);
 
     const raw = item.markdownOutput || JSON.stringify(item.extractedData, null, 2);
@@ -313,9 +379,77 @@ export function exportCategoryToMergedMarkdown(
   }
 
   const catPrefix = String(catIndex).padStart(2, '0');
-  const catSlug = category.slug || slugify(category.name);
+  const catSlug = safeFileSlug(category.slug || category.name, 'chuyen-muc');
   const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
   const filename = `${catPrefix}-${catSlug}-${slugify(docTitle)}.md`;
   triggerBlobDownload(blob, filename);
   return true;
+}
+
+// ==========================================
+// GHI TRỰC TIẾP VÀO THƯ MỤC (File System Access API — Chrome/Edge)
+// ==========================================
+
+export function supportsDirectoryOutput(): boolean {
+  return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+}
+
+/** Asks the user for an output folder (e.g. a folder inside the Obsidian vault). */
+export async function pickOutputDirectory(): Promise<FileSystemDirectoryHandle> {
+  if (!window.showDirectoryPicker) {
+    throw new Error('Trình duyệt không hỗ trợ ghi thư mục. Hãy dùng Chrome hoặc Edge.');
+  }
+  return window.showDirectoryPicker({ id: 'firecrawl-output', mode: 'readwrite' });
+}
+
+async function writeTextFile(dir: FileSystemDirectoryHandle, name: string, content: string) {
+  const file = await dir.getFileHandle(name, { create: true });
+  const writable = await file.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+/**
+ * Writes one finished article to `<dir>/<NN-category>/<NN-article>.md`.
+ * Numbers follow the scanned tree order, so re-running a batch overwrites the same files.
+ */
+export async function writeArticleToDirectory(
+  dir: FileSystemDirectoryHandle,
+  categories: DocCategory[],
+  itemId: string,
+  flavor: ExportFlavor
+): Promise<string | null> {
+  for (let c = 0; c < categories.length; c++) {
+    const category = categories[c];
+    const i = category.items.findIndex((it) => it.id === itemId);
+    if (i === -1) continue;
+    const item = category.items[i];
+    if (!item.markdownOutput && !item.extractedData) return null;
+    const folderName = categoryFolderName(category, c + 1);
+    const folder = await dir.getDirectoryHandle(folderName, { create: true });
+    const fileName = articleFileName(item, i + 1);
+    await writeTextFile(folder, fileName, formatStandaloneArticleMarkdown(item, category.name, flavor));
+    return `${folderName}/${fileName}`;
+  }
+  return null;
+}
+
+/** Writes README.md listing every finished article, using the same paths as writeArticleToDirectory. */
+export async function writeIndexToDirectory(
+  dir: FileSystemDirectoryHandle,
+  categories: DocCategory[],
+  docTitle: string
+): Promise<void> {
+  const lines = [`# 📚 ${docTitle} - Mục Lục`, `> Cập nhật: ${new Date().toLocaleString('vi-VN')}`, ''];
+  categories.forEach((category, c) => {
+    const done = category.items
+      .map((item, i) => ({ item, i }))
+      .filter(({ item }) => item.markdownOutput || item.extractedData);
+    if (done.length === 0) return;
+    const folderName = categoryFolderName(category, c + 1);
+    lines.push(`## ${c + 1}. ${category.name}`);
+    done.forEach(({ item, i }) => lines.push(`- [${item.title}](./${folderName}/${articleFileName(item, i + 1)})`));
+    lines.push('');
+  });
+  await writeTextFile(dir, 'README.md', lines.join('\n'));
 }

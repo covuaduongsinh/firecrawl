@@ -70,10 +70,10 @@ export default function AIEngineSettings({
     try {
       const res = await testAIConnection(config);
       setTestResult(res);
-    } catch (e: any) {
+    } catch (e) {
       setTestResult({
         success: false,
-        message: e?.message || "Lỗi kiểm tra kết nối",
+        message: e instanceof Error ? e.message : "Lỗi kiểm tra kết nối",
         latencyMs: 0,
       });
     } finally {
@@ -84,7 +84,7 @@ export default function AIEngineSettings({
   // Helper hiển thị tên Model đang dùng
   const getActiveModelDisplay = () => {
     switch (config.engine) {
-      case "gemini":
+      case "gemini": {
         const modelLabel = config.geminiModel === "default" || !config.geminiModel ? "Antigravity Auto" : config.geminiModel;
         if (config.geminiApiKey) {
           return `${modelLabel} (API Key)`;
@@ -92,13 +92,14 @@ export default function AIEngineSettings({
         return cliInfo.antigravity.available
           ? `${modelLabel} (Antigravity CLI)`
           : `${modelLabel} (Chưa có Key)`;
+      }
       case "claude":
         if (config.claudeApiKey) {
-          return `${config.claudeModel || "claude-3-5-sonnet"} (API Key)`;
+          return `${config.claudeModel || "claude-sonnet-5"} (API Key)`;
         }
         return cliInfo.claude.available
-          ? `${config.claudeModel || "claude-3-5-sonnet"} (Claude CLI)`
-          : `${config.claudeModel || "claude-3-5-sonnet"} (Chưa có Key)`;
+          ? `${config.claudeModel || "claude-sonnet-5"} (Claude CLI)`
+          : `${config.claudeModel || "claude-sonnet-5"} (Chưa có Key)`;
       case "ollama":
         return `${config.ollamaModel || "llama3"} (Local: ${config.ollamaBaseUrl})`;
       case "openai":
@@ -393,9 +394,9 @@ export default function AIEngineSettings({
                     onChange={(e) => handleFieldChange("claudeModel", e.target.value)}
                     className="w-full h-9 rounded-md bg-slate-900 border border-slate-700 text-slate-200 text-xs px-2.5 mt-1 focus:outline-none focus:ring-1 focus:ring-purple-500"
                   >
-                    <option value="claude-3-5-sonnet">Claude 3.5 Sonnet (Thông minh & Chuẩn xác)</option>
-                    <option value="claude-3-5-haiku">Claude 3.5 Haiku (Siêu tốc độ)</option>
-                    <option value="claude-3-opus">Claude 3 Opus</option>
+                    <option value="claude-sonnet-5">Claude Sonnet 5 (Cân bằng — Khuyên dùng)</option>
+                    <option value="claude-opus-5-5">Claude Opus 5.5 (Chính xác cao nhất)</option>
+                    <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (Nhanh & tiết kiệm)</option>
                   </select>
                 </div>
               </div>
@@ -468,7 +469,7 @@ export default function AIEngineSettings({
 
           {config.engine === "firecrawl" && (
             <div className="text-xs text-slate-300 bg-slate-900 p-2.5 rounded border border-slate-800">
-              💡 Chế độ này gửi trực tiếp request đến endpoint <code>/v1/extract</code> của backend Docker Firecrawl.
+              💡 Chế độ này gửi trực tiếp request đến endpoint <code>/v2/extract</code> của backend Docker Firecrawl.
             </div>
           )}
 

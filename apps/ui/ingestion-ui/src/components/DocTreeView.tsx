@@ -1,6 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { DocCategory, DocItem } from '@/lib/docTreeScanner';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,7 +16,6 @@ import {
   AlertCircle,
   Loader2,
   Sparkles,
-  Download,
   FileArchive,
   BookOpen,
   ExternalLink,

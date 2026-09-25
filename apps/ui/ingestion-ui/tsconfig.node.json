@@ -3,11 +3,14 @@
     "composite": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "skipLibCheck": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
     "strict": true,
+    "types": ["node"],
     "noEmit": true
   },
-  "include": ["vite.config.ts", "vite-plugin-cli.ts"]
+  "include": ["vite.config.ts", "vitest.config.ts", "vite-plugin-cli.ts", "bridge"]
 }
