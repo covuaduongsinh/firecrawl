@@ -1,4 +1,5 @@
 import { bridgeFetch } from "./bridgeClient";
+import { HttpError } from "./retry";
 export type AIEngineType = "gemini" | "claude" | "ollama" | "openai" | "firecrawl";
 
 export interface AIEngineConfig {
@@ -316,8 +317,10 @@ export async function executeDirectAIExtract(
   contents: { url: string; markdown: string }[],
   userPrompt: string,
   schema: any | undefined,
-  config: AIEngineConfig
+  config: AIEngineConfig,
+  options: { signal?: AbortSignal } = {}
 ): Promise<{ extractedJson: any; engineUsed: string; modelUsed: string }> {
+  const { signal } = options;
   const combinedContext = contents
     .map(
       (c, i) =>
@@ -352,20 +355,21 @@ IMPORTANT RULES:
         contents: [{ parts: [{ text: finalPrompt }] }],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 32768,
           responseMimeType: "application/json",
         },
       };
 
       const res = await fetch(url, {
         method: "POST",
+        signal,
         headers: { "Content-Type": "application/json", "x-goog-api-key": key },
         body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`Gemini API error (${res.status}): ${errText.slice(0, 300)}`);
+        throw new HttpError(res.status, `Gemini API error (${res.status}): ${errText.slice(0, 300)}`);
       }
 
       const data = await res.json();
@@ -380,6 +384,7 @@ IMPORTANT RULES:
     // Nếu không có API Key -> Gọi Antigravity CLI qua Local Bridge
     const cliRes = await bridgeFetch("/api/cli/extract", {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         engine: "antigravity",
@@ -390,7 +395,8 @@ IMPORTANT RULES:
 
     if (!cliRes.ok) {
       const err = await cliRes.json().catch(() => ({}));
-      throw new Error(
+      throw new HttpError(
+        cliRes.status,
         err.error ||
           "Không thể thực thi Antigravity CLI. Hãy cài đặt Antigravity hoặc nhập Gemini API Key trong phần Cài đặt."
       );
@@ -413,17 +419,18 @@ IMPORTANT RULES:
       const model = config.claudeModel || DEFAULT_AI_CONFIG.claudeModel;
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
+        signal,
         headers: anthropicHeaders(key),
         body: JSON.stringify({
           model,
-          max_tokens: 8192,
+          max_tokens: 16000,
           messages: [{ role: "user", content: finalPrompt }],
         }),
       });
 
       if (!res.ok) {
         const err = await res.text();
-        throw new Error(`Claude API error (${res.status}): ${err.slice(0, 300)}`);
+        throw new HttpError(res.status, `Claude API error (${res.status}): ${err.slice(0, 300)}`);
       }
 
       const data = await res.json();
@@ -438,6 +445,7 @@ IMPORTANT RULES:
     // Nếu không có API Key -> Gọi Claude Code CLI qua Local Bridge
     const cliRes = await bridgeFetch("/api/cli/extract", {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         engine: "claude",
@@ -447,7 +455,8 @@ IMPORTANT RULES:
 
     if (!cliRes.ok) {
       const err = await cliRes.json().catch(() => ({}));
-      throw new Error(
+      throw new HttpError(
+        cliRes.status,
         err.error ||
           "Không thể thực thi Claude Code CLI. Hãy đảm bảo đã cài đặt 'claude' hoặc nhập Anthropic API Key trong Cài đặt."
       );
@@ -467,6 +476,7 @@ IMPORTANT RULES:
     const model = config.ollamaModel || "llama3";
     const res = await fetch(`${baseUrl}/api/generate`, {
       method: "POST",
+      signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
@@ -478,7 +488,7 @@ IMPORTANT RULES:
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Ollama error (${res.status}): ${errText.slice(0, 300)}`);
+      throw new HttpError(res.status, `Ollama error (${res.status}): ${errText.slice(0, 300)}`);
     }
 
     const data = await res.json();
@@ -500,6 +510,7 @@ IMPORTANT RULES:
 
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
@@ -520,7 +531,7 @@ IMPORTANT RULES:
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`API error (${res.status}): ${errText.slice(0, 300)}`);
+      throw new HttpError(res.status, `API error (${res.status}): ${errText.slice(0, 300)}`);
     }
 
     const data = await res.json();

@@ -1,78 +1,103 @@
+import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
 import { bridgeFetch } from './bridgeClient';
+// Phần giao diện không thuộc nội dung bài viết.
+const NOISE_SELECTORS = [
+  "script",
+  "style",
+  "noscript",
+  "template",
+  "iframe",
+  "form",
+  "button",
+  "nav",
+  "footer",
+  "aside",
+  "[role=navigation]",
+  ".sidebar",
+  ".wiki-sidebar",
+  ".toc",
+  ".table-of-contents",
+  ".breadcrumb",
+  ".breadcrumbs",
+  ".pagination",
+  ".edit-link",
+  ".feedback",
+];
+
+// Vùng nội dung chính, theo thứ tự ưu tiên (Frappe Wiki, trang docs phổ biến, HTML chuẩn).
+const MAIN_CONTENT_SELECTORS = [
+  "#wiki-content",
+  ".wiki-content",
+  "article",
+  "main",
+  "[role=main]",
+  ".markdown-body",
+  ".markdown",
+  ".prose",
+  "#content",
+  ".content",
+];
+const MIN_MAIN_CONTENT_CHARS = 200;
+
+let turndownService: TurndownService | null = null;
+
+function getTurndown(): TurndownService {
+  if (!turndownService) {
+    turndownService = new TurndownService({
+      headingStyle: "atx",
+      codeBlockStyle: "fenced",
+      bulletListMarker: "-",
+      emDelimiter: "*",
+    });
+    turndownService.use(gfm);
+  }
+  return turndownService;
+}
+
+function pickMainContent(doc: Document): Element {
+  for (const selector of MAIN_CONTENT_SELECTORS) {
+    const el = doc.querySelector(selector);
+    if (el && (el.textContent || "").trim().length >= MIN_MAIN_CONTENT_CHARS) return el;
+  }
+  return doc.body;
+}
+
+function absolutize(root: Element, attr: string, baseUrl: string) {
+  root.querySelectorAll(`[${attr}]`).forEach((el) => {
+    const value = el.getAttribute(attr);
+    if (!value || value.startsWith("#") || /^(data|mailto|tel|javascript):/i.test(value)) return;
+    try {
+      el.setAttribute(attr, new URL(value, baseUrl).toString());
+    } catch {
+      // Leave malformed URLs untouched.
+    }
+  });
+}
+
 /**
- * Convert HTML to clean Markdown format preserving headings, images, lists, and code blocks
+ * Convert HTML to clean Markdown (headings, lists, tables, code blocks, images, links),
+ * keeping only the main article area and resolving relative URLs against `baseUrl`.
  */
 export function convertHtmlToMarkdown(html: string, baseUrl: string): string {
-  let clean = html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-    .replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, '')
-    .replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, '')
-    .replace(/<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/gi, '')
-    .replace(/<aside\b[^<]*(?:(?!<\/aside>)<[^<]*)*<\/aside>/gi, '');
-
-  // Extract main article content if exists
-  const mainMatch =
-    clean.match(/<main[^>]*>([\s\S]*?)<\/main>/i) ||
-    clean.match(/<article[^>]*>([\s\S]*?)<\/article>/i) ||
-    clean.match(/<div[^>]*id="wiki-content"[^>]*>([\s\S]*?)<\/div>/i) ||
-    clean.match(/<div[^>]*class="[^"]*(?:wiki-content|markdown|content|prose)[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
-
-  if (mainMatch) {
-    clean = mainMatch[1];
-  }
-
-  const baseOrigin = new URL(baseUrl).origin;
-
-  // Headings
-  clean = clean.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n');
-  clean = clean.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
-  clean = clean.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
-  clean = clean.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n#### $1\n');
-
-  // Code blocks
-  clean = clean.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, '\n```\n$1\n```\n');
-  clean = clean.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
-
-  // Images with absolute URL resolution
-  clean = clean.replace(/<img[^>]*src="([^"]+)"[^>]*alt="([^"]*)"[^>]*>/gi, (_, src, alt) => {
-    const fullSrc = src.startsWith('/') ? `${baseOrigin}${src}` : src;
-    return `![${alt}](${fullSrc})`;
-  });
-  clean = clean.replace(/<img[^>]*src="([^"]+)"[^>]*>/gi, (_, src) => {
-    const fullSrc = src.startsWith('/') ? `${baseOrigin}${src}` : src;
-    return `![](${fullSrc})`;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll(NOISE_SELECTORS.join(",")).forEach((el) => el.remove());
+  // Site headers are noise, but an <article>'s own <header> usually holds the page title.
+  doc.querySelectorAll("header").forEach((el) => {
+    if (!el.closest("article, main")) el.remove();
   });
 
-  // Links
-  clean = clean.replace(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, text) => {
-    const fullHref = href.startsWith('/') ? `${baseOrigin}${href}` : href;
-    return `[${text}](${fullHref})`;
+  const main = pickMainContent(doc);
+  main.querySelectorAll("img[data-src]:not([src])").forEach((img) => {
+    img.setAttribute("src", img.getAttribute("data-src") || "");
   });
+  absolutize(main, "href", baseUrl);
+  absolutize(main, "src", baseUrl);
 
-  // Bold & Italic
-  clean = clean.replace(/<(?:strong|b)[^>]*>([\s\S]*?)<\/(?:strong|b)>/gi, '**$1**');
-  clean = clean.replace(/<(?:em|i)[^>]*>([\s\S]*?)<\/(?:em|i)>/gi, '*$1*');
-
-  // Lists & Paragraphs
-  clean = clean.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n');
-  clean = clean.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n');
-
-  // Strip remaining HTML tags
-  clean = clean.replace(/<[^>]+>/g, '');
-
-  // Entities
-  clean = clean
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
-
-  // Whitespace clean
-  clean = clean.replace(/\n\s*\n\s*\n/g, '\n\n').trim();
-  return clean;
+  return getTurndown()
+    .turndown(main.innerHTML)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
@@ -84,11 +109,12 @@ export function convertHtmlToMarkdown(html: string, baseUrl: string): string {
 export async function scrapePageMarkdown(
   url: string,
   firecrawlApiUrl: string = 'http://localhost:3002',
-  apiKey: string = ''
+  apiKey: string = '',
+  signal?: AbortSignal
 ): Promise<string> {
   // Strategy 1: Vite Proxy Fetch (Fastest, zero-config, bypasses CORS & offline Docker issues)
   try {
-    const proxyRes = await bridgeFetch(`/api/proxy/fetch-html?url=${encodeURIComponent(url)}`);
+    const proxyRes = await bridgeFetch(`/api/proxy/fetch-html?url=${encodeURIComponent(url)}`, { signal });
     if (proxyRes.ok) {
       const proxyJson = await proxyRes.json();
       if (proxyJson.success && proxyJson.html) {
@@ -99,6 +125,7 @@ export async function scrapePageMarkdown(
       }
     }
   } catch (e) {
+    if (signal?.aborted) throw e;
     console.warn('Proxy fetch failed for page, trying Firecrawl API...', e);
   }
 
@@ -106,6 +133,7 @@ export async function scrapePageMarkdown(
   try {
     const scrapeRes = await fetch(`${firecrawlApiUrl}/v1/scrape`, {
       method: 'POST',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
@@ -125,18 +153,20 @@ export async function scrapePageMarkdown(
       }
     }
   } catch (e) {
+    if (signal?.aborted) throw e;
     console.warn('Firecrawl API scrape failed, trying direct browser fetch...', e);
   }
 
   // Strategy 3: Direct browser fetch fallback
   try {
-    const directRes = await fetch(url);
+    const directRes = await fetch(url, { signal });
     if (directRes.ok) {
       const html = await directRes.text();
       const md = convertHtmlToMarkdown(html, url);
       if (md) return md;
     }
   } catch (e) {
+    if (signal?.aborted) throw e;
     console.warn('Direct browser fetch also failed:', e);
   }
 

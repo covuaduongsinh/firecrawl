@@ -36,8 +36,8 @@ import {
   exportCategoryToMergedMarkdown,
   triggerBlobDownload,
 } from '@/lib/batchExporter';
-import { AIEngineConfig, loadAIConfig, executeDirectAIExtract } from '@/lib/aiEngines';
-import { formatExtractToMarkdown } from '@/lib/markdownFormatter';
+import { AIEngineConfig, loadAIConfig } from '@/lib/aiEngines';
+import { processDocument } from '@/lib/documentProcessor';
 import { scrapePageMarkdown } from '@/lib/pageScraper';
 
 interface BatchDocExtractorProps {
@@ -255,31 +255,23 @@ export default function BatchDocExtractor({
         throw new Error('Không nhận được nội dung markdown từ trang web.');
       }
 
-      // 2. Direct AI Translation / Extraction
+      // 2. AI Translation / Extraction (trang dài được chia phần theo heading, không bị cắt cụt)
       updateItemStatus(item.id, { status: 'translating' });
 
-      const aiResult = await executeDirectAIExtract(
-        [{ url: item.url, markdown: rawMarkdown }],
+      const result = await processDocument(rawMarkdown, {
+        title: item.title,
+        url: item.url,
         prompt,
-        undefined,
-        aiConfig
-      );
-
-      // 3. Format to beautiful Markdown
-      const formattedMd = formatExtractToMarkdown(
-        aiResult.extractedJson,
-        {
-          title: item.title,
-          sourceUrl: item.url,
-          engineUsed: aiResult.engineUsed,
-          modelUsed: aiResult.modelUsed,
-        }
-      );
+        config: aiConfig,
+        onChunk: (index, total) => {
+          if (total > 1) setProgressText(`Đang dịch "${item.title}" — phần ${index}/${total}`);
+        },
+      });
 
       updateItemStatus(item.id, {
         status: 'done',
-        extractedData: aiResult.extractedJson,
-        markdownOutput: formattedMd,
+        extractedData: result.extractedData,
+        markdownOutput: result.markdownOutput,
       });
 
       return true;
