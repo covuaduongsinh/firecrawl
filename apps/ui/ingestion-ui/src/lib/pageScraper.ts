@@ -1,3 +1,4 @@
+import { bridgeFetch } from './bridgeClient';
 /**
  * Convert HTML to clean Markdown format preserving headings, images, lists, and code blocks
  */
@@ -87,7 +88,7 @@ export async function scrapePageMarkdown(
 ): Promise<string> {
   // Strategy 1: Vite Proxy Fetch (Fastest, zero-config, bypasses CORS & offline Docker issues)
   try {
-    const proxyRes = await fetch(`/api/proxy/fetch-html?url=${encodeURIComponent(url)}`);
+    const proxyRes = await bridgeFetch(`/api/proxy/fetch-html?url=${encodeURIComponent(url)}`);
     if (proxyRes.ok) {
       const proxyJson = await proxyRes.json();
       if (proxyJson.success && proxyJson.html) {

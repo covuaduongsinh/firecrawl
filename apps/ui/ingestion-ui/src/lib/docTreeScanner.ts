@@ -1,3 +1,4 @@
+import { bridgeFetch } from './bridgeClient';
 export interface DocItem {
   id: string;
   url: string;
@@ -205,7 +206,7 @@ export async function scanDocTree(
 
   // --- Tier 1: Try Direct HTML Proxy Fetch (Vite CLI Bridge) ---
   try {
-    const proxyRes = await fetch(`/api/proxy/fetch-html?url=${encodeURIComponent(cleanRoot)}`);
+    const proxyRes = await bridgeFetch(`/api/proxy/fetch-html?url=${encodeURIComponent(cleanRoot)}`);
     if (proxyRes.ok) {
       const proxyJson = await proxyRes.json();
       if (proxyJson.success && proxyJson.html) {

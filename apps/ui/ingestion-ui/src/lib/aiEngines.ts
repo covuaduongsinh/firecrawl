@@ -1,3 +1,4 @@
+import { bridgeFetch } from "./bridgeClient";
 export type AIEngineType = "gemini" | "claude" | "ollama" | "openai" | "firecrawl";
 
 export interface AIEngineConfig {
@@ -144,7 +145,7 @@ export async function getLocalCliStatus(): Promise<{
   claude: { available: boolean; path: string | null };
 }> {
   try {
-    const res = await fetch("/api/cli/status");
+    const res = await bridgeFetch("/api/cli/status");
     if (res.ok) {
       return await res.json();
     }
@@ -377,7 +378,7 @@ IMPORTANT RULES:
     }
 
     // Nếu không có API Key -> Gọi Antigravity CLI qua Local Bridge
-    const cliRes = await fetch("/api/cli/extract", {
+    const cliRes = await bridgeFetch("/api/cli/extract", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -435,7 +436,7 @@ IMPORTANT RULES:
     }
 
     // Nếu không có API Key -> Gọi Claude Code CLI qua Local Bridge
-    const cliRes = await fetch("/api/cli/extract", {
+    const cliRes = await bridgeFetch("/api/cli/extract", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
