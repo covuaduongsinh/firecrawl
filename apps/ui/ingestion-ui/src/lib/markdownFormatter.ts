@@ -2,6 +2,12 @@
  * Module chuyển đổi dữ liệu trích xuất AI thành tài liệu Markdown chuẩn, đẹp mắt, dễ đọc, không trùng lặp.
  */
 
+/**
+ * AI output has no fixed shape (the prompt decides it), so the formatter walks it dynamically.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LooseJson = any;
+
 export interface FormatterOptions {
   title?: string;
   sourceUrl?: string;
@@ -68,7 +74,7 @@ function cleanMarkdownText(text: string): string {
 }
 
 export function formatExtractToMarkdown(
-  rawResult: any,
+  rawResult: LooseJson,
   optionsInput: FormatterOptions | string = {}
 ): string {
   if (!rawResult) return "";
@@ -172,7 +178,7 @@ export function formatExtractToMarkdown(
   // Ưu tiên 2: Có mảng `sections` có cấu trúc
   else if (Array.isArray(rootData.sections) && rootData.sections.length > 0) {
     out += `## 📖 Nội Dung Chi Tiết\n\n`;
-    rootData.sections.forEach((sec: any, idx: number) => {
+    rootData.sections.forEach((sec: LooseJson, idx: number) => {
       renderSection(sec, idx + 1);
     });
   }
@@ -216,7 +222,7 @@ export function formatExtractToMarkdown(
   }
 
   // 4. Render mảng câu song ngữ thành Markdown đẹp mắt (Không in JSON thô)
-  function renderBilingualChunks(chunks: any[]) {
+  function renderBilingualChunks(chunks: LooseJson[]) {
     for (const chunk of chunks) {
       if (typeof chunk === "string") {
         if (!isBoilerplateText(chunk)) {
@@ -254,7 +260,7 @@ export function formatExtractToMarkdown(
     }
   }
 
-  function renderSection(sec: any, index: number) {
+  function renderSection(sec: LooseJson, index: number) {
     if (!sec || typeof sec !== "object") {
       if (!isBoilerplateText(String(sec))) {
         out += `### Mục ${index}\n\n${sec}\n\n`;
@@ -313,7 +319,7 @@ export function formatExtractToMarkdown(
     out += `\n`;
   }
 
-  function renderListItems(items: any[]) {
+  function renderListItems(items: LooseJson[]) {
     items.forEach((item) => {
       if (typeof item === "string" || typeof item === "number") {
         if (!isBoilerplateText(String(item))) {
@@ -351,7 +357,7 @@ export function formatExtractToMarkdown(
     out += `\n`;
   }
 
-  function renderGenericField(key: string, val: any, depth = 2) {
+  function renderGenericField(key: string, val: LooseJson, depth = 2) {
     if (val === null || val === undefined) return;
 
     const readableTitle = key

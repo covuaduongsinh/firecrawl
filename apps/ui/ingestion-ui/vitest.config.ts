@@ -9,6 +9,6 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts", "bridge/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "bridge/**/*.test.ts"],
   },
 });

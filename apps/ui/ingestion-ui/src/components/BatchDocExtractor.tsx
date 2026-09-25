@@ -43,7 +43,7 @@ import {
 } from '@/lib/batchExporter';
 import { AIEngineConfig, loadAIConfig } from '@/lib/aiEngines';
 import { processDocument } from '@/lib/documentProcessor';
-import { runQueue, waitWhilePaused } from '@/lib/batchQueue';
+import { useBatchRunner } from '@/hooks/useBatchRunner';
 import { isAbortError, withRetry } from '@/lib/retry';
 import { countDoneItems, loadSession, saveSession } from '@/lib/sessionStore';
 import { scrapePageMarkdown } from '@/lib/pageScraper';
@@ -117,10 +117,8 @@ export default function BatchDocExtractor({
   const [aiConfig, setAiConfig] = useState<AIEngineConfig>(loadAIConfig);
 
   // Batch Runner State
-  const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [isPaused, setIsPaused] = useState<boolean>(false);
-  const [isStopping, setIsStopping] = useState<boolean>(false);
-  const [progressText, setProgressText] = useState<string>('');
+  const runner = useBatchRunner();
+  const { isRunning, isPaused, isStopping, progressText, setProgressText } = runner;
   const [skipDone, setSkipDone] = useState<boolean>(true);
   const [concurrency, setConcurrency] = useState<number>(1);
 
@@ -141,8 +139,6 @@ export default function BatchDocExtractor({
   const [activePreviewTab, setActivePreviewTab] = useState<'formatted_md' | 'json' | 'raw_md'>('formatted_md');
 
   // Refs read by the running batch (always current, unlike render-time closures)
-  const isPausedRef = useRef<boolean>(false);
-  const abortRef = useRef<AbortController | null>(null);
   const categoriesRef = useRef<DocCategory[]>(categories);
   const downloadedCategorySlugsRef = useRef<Set<string>>(downloadedCategorySlugs);
   const rootUrlRef = useRef<string>(rootUrl);
@@ -375,7 +371,7 @@ export default function BatchDocExtractor({
 
   // Chạy một danh sách bài (dùng chung cho "Bắt đầu" và "Dịch lại bài đang xem")
   const runItems = async (queue: { catSlug: string; item: DocItem }[]) => {
-    if (abortRef.current || queue.length === 0) return;
+    if (isRunning || queue.length === 0) return;
 
     // Hỏi thư mục trước tiên, khi vẫn còn "user gesture" của cú bấm nút.
     let dir: FileSystemDirectoryHandle | null = null;
@@ -384,51 +380,25 @@ export default function BatchDocExtractor({
       if (!dir) return;
     }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-    isPausedRef.current = false;
-    setIsPaused(false);
-    setIsStopping(false);
-    setIsRunning(true);
-
-    const total = queue.length;
-    let succeeded = 0;
-    try {
-      await runQueue(
-        queue,
-        async ({ item, catSlug }, index) => {
-          setProgressText(`Đang xử lý (${index + 1}/${total}): ${item.category} -> ${item.title}`);
-          if (concurrency === 1) setActiveItemId(item.id);
-          if (await processSingleItem(item, controller.signal, dir)) succeeded++;
-          if (!controller.signal.aborted && autoSaveMode === 'download') {
-            await maybeDownloadCategory(catSlug);
-          }
-        },
-        {
-          concurrency,
-          signal: controller.signal,
-          beforeEach: () => waitWhilePaused(() => isPausedRef.current, controller.signal),
-        }
-      );
-    } finally {
-      abortRef.current = null;
-      await flushSession();
-      if (dir) {
+    await runner.run(queue, {
+      concurrency,
+      worker: async ({ item, catSlug }, index, signal) => {
+        setProgressText(`Đang xử lý (${index + 1}/${queue.length}): ${item.category} -> ${item.title}`);
+        if (concurrency === 1) setActiveItemId(item.id);
+        const ok = await processSingleItem(item, signal, dir);
+        if (!signal.aborted && autoSaveMode === 'download') await maybeDownloadCategory(catSlug);
+        return ok;
+      },
+      onFinish: async () => {
+        await flushSession();
+        if (!dir) return;
         try {
           await writeIndexToDirectory(dir, categoriesRef.current, getDocTitleFromUrl(rootUrlRef.current));
         } catch (err) {
           setStorageError(`Không ghi được mục lục README.md: ${err instanceof Error ? err.message : String(err)}`);
         }
-      }
-      setIsRunning(false);
-      setIsPaused(false);
-      setIsStopping(false);
-      setProgressText(
-        controller.signal.aborted
-          ? `Đã dừng tiến trình (${succeeded}/${total} bài thành công).`
-          : `Hoàn thành đợt xử lý (${succeeded}/${total} bài thành công)!`
-      );
-    }
+      },
+    });
   };
 
   // Batch Runner
@@ -451,22 +421,6 @@ export default function BatchDocExtractor({
       return;
     }
     await runItems(queue);
-  };
-
-  const handlePauseToggle = () => {
-    const next = !isPausedRef.current;
-    isPausedRef.current = next;
-    setIsPaused(next);
-    if (next) setProgressText('Đang tạm dừng — bài đang xử lý sẽ hoàn tất rồi dừng...');
-  };
-
-  const handleCancelBatch = () => {
-    if (!abortRef.current) return;
-    abortRef.current.abort();
-    isPausedRef.current = false;
-    setIsPaused(false);
-    setIsStopping(true);
-    setProgressText('Đang dừng, hủy các yêu cầu đang chạy...');
   };
 
   // Re-run single active item
@@ -693,7 +647,7 @@ export default function BatchDocExtractor({
               ) : (
                 <>
                   <Button
-                    onClick={handlePauseToggle}
+                    onClick={runner.togglePause}
                     disabled={isStopping}
                     variant="outline"
                     className="h-9 px-3 text-xs border-amber-600 text-amber-400 hover:bg-amber-950/50"
@@ -711,7 +665,7 @@ export default function BatchDocExtractor({
                     )}
                   </Button>
                   <Button
-                    onClick={handleCancelBatch}
+                    onClick={runner.cancel}
                     disabled={isStopping}
                     variant="destructive"
                     className="h-9 px-3 text-xs"

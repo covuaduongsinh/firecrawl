@@ -1,0 +1,46 @@
+name: Ingestion UI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - apps/ui/ingestion-ui/**
+      - .github/workflows/ingestion-ui.yml
+  push:
+    branches:
+      - main
+    paths:
+      - apps/ui/ingestion-ui/**
+      - .github/workflows/ingestion-ui.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, test and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./apps/ui/ingestion-ui
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4
+        with:
+          version: 10
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: ./apps/ui/ingestion-ui/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm build

@@ -39,10 +39,10 @@ import { formatExtractToMarkdown } from "@/lib/markdownFormatter";
 
 //! Dynamic API URL fallback to current host or local instance
 const FIRECRAWL_API_URL =
-  (import.meta as any).env?.VITE_FIRECRAWL_API_URL ||
+  import.meta.env.VITE_FIRECRAWL_API_URL ||
   (typeof window !== "undefined" && window.location.origin ? window.location.origin : "http://localhost:3002");
 const FIRECRAWL_API_KEY =
-  (import.meta as any).env?.VITE_FIRECRAWL_API_KEY || "";
+  import.meta.env.VITE_FIRECRAWL_API_KEY || "";
 
 interface FormData {
   url: string;
@@ -119,7 +119,7 @@ interface ScrapeResult {
 
 interface ExtractApiResponse {
   success: boolean;
-  data?: any;
+  data?: unknown;
   error?: string;
 }
 
@@ -175,7 +175,7 @@ export default function FirecrawlComponentV1() {
   const [scrapeResults, setScrapeResults] = useState<
     Record<string, ScrapeResult>
   >({});
-  const [extractResult, setExtractResult] = useState<any>(null);
+  const [extractResult, setExtractResult] = useState<ExtractApiResponse | null>(null);
   const [isCollapsibleOpen, setIsCollapsibleOpen] = useState(true);
   const [crawlStatus, setCrawlStatus] = useState<{
     current: number;
@@ -225,7 +225,7 @@ export default function FirecrawlComponentV1() {
 
   const handleDownloadAllMarkdown = () => {
     const allMarkdown = Object.entries(scrapeResults)
-      .filter(([_, res]) => res.success && res.data?.markdown)
+      .filter(([, res]) => res.success && res.data?.markdown)
       .map(
         ([url, res]) =>
           `# ${res.data.metadata?.title || url}\n**Source:** ${url}\n\n${res.data.markdown}\n\n---\n`
@@ -435,7 +435,7 @@ export default function FirecrawlComponentV1() {
       if (extractFormData.useSchema && extractFormData.schema.trim()) {
         try {
           parsedSchema = JSON.parse(extractFormData.schema);
-        } catch (err) {
+        } catch {
           throw new Error("JSON Schema không hợp lệ. Vui lòng kiểm tra lại cú pháp JSON.");
         }
       }

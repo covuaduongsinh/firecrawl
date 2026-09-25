@@ -98,14 +98,14 @@ export function cleanJsonOutput(text: string): string {
 /**
  * Phân tích kết quả từ AI: ưu tiên JSON, nếu AI trả về Markdown/Text thuần thì tự động đóng gói cấu trúc
  */
-export function parseAIOutputSafe(rawText: string): any {
+export function parseAIOutputSafe(rawText: string): unknown {
   if (!rawText) return {};
   const clean = cleanJsonOutput(rawText);
 
   // 1. Parse trực tiếp nếu là JSON hợp lệ
   try {
     return JSON.parse(clean);
-  } catch (e1) {
+  } catch {
     // 2. Tìm khối JSON { ... } nằm bên trong văn bản
     const firstBrace = clean.indexOf("{");
     const lastBrace = clean.lastIndexOf("}");
@@ -113,7 +113,7 @@ export function parseAIOutputSafe(rawText: string): any {
       try {
         const potentialJson = clean.substring(firstBrace, lastBrace + 1);
         return JSON.parse(potentialJson);
-      } catch (e2) {
+      } catch {
         // Tiếp tục thử dạng mảng
       }
     }
@@ -125,7 +125,7 @@ export function parseAIOutputSafe(rawText: string): any {
       try {
         const potentialJson = clean.substring(firstBracket, lastBracket + 1);
         return JSON.parse(potentialJson);
-      } catch (e3) {
+      } catch {
         // Không phải JSON
       }
     }
@@ -262,7 +262,7 @@ export async function testAIConnection(
         };
       }
       const data = await res.json();
-      const models = (data.models || []).map((m: any) => m.name).join(", ");
+      const models = ((data.models || []) as { name: string }[]).map((m) => m.name).join(", ");
       return {
         success: true,
         message: `✅ Kết nối thành công Ollama (${latency}ms)! Models: ${models || "Chưa có model"}`,
@@ -300,11 +300,11 @@ export async function testAIConnection(
       message: "Firecrawl Backend Engine mặc định.",
       latencyMs: 0,
     };
-  } catch (e: any) {
+  } catch (e) {
     const latency = Math.round(performance.now() - start);
     return {
       success: false,
-      message: `Lỗi kết nối: ${e?.message || e}`,
+      message: `Lỗi kết nối: ${e instanceof Error ? e.message : String(e)}`,
       latencyMs: latency,
     };
   }
@@ -316,10 +316,10 @@ export async function testAIConnection(
 export async function executeDirectAIExtract(
   contents: { url: string; markdown: string }[],
   userPrompt: string,
-  schema: any | undefined,
+  schema: unknown,
   config: AIEngineConfig,
   options: { signal?: AbortSignal } = {}
-): Promise<{ extractedJson: any; engineUsed: string; modelUsed: string }> {
+): Promise<{ extractedJson: unknown; engineUsed: string; modelUsed: string }> {
   const { signal } = options;
   const combinedContext = contents
     .map(
@@ -351,7 +351,7 @@ IMPORTANT RULES:
       const model = config.geminiModel || "gemini-2.5-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-      const payload: any = {
+      const payload = {
         contents: [{ parts: [{ text: finalPrompt }] }],
         generationConfig: {
           temperature: 0.1,

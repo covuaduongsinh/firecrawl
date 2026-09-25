@@ -70,10 +70,10 @@ export default function AIEngineSettings({
     try {
       const res = await testAIConnection(config);
       setTestResult(res);
-    } catch (e: any) {
+    } catch (e) {
       setTestResult({
         success: false,
-        message: e?.message || "Lỗi kiểm tra kết nối",
+        message: e instanceof Error ? e.message : "Lỗi kiểm tra kết nối",
         latencyMs: 0,
       });
     } finally {
@@ -84,7 +84,7 @@ export default function AIEngineSettings({
   // Helper hiển thị tên Model đang dùng
   const getActiveModelDisplay = () => {
     switch (config.engine) {
-      case "gemini":
+      case "gemini": {
         const modelLabel = config.geminiModel === "default" || !config.geminiModel ? "Antigravity Auto" : config.geminiModel;
         if (config.geminiApiKey) {
           return `${modelLabel} (API Key)`;
@@ -92,6 +92,7 @@ export default function AIEngineSettings({
         return cliInfo.antigravity.available
           ? `${modelLabel} (Antigravity CLI)`
           : `${modelLabel} (Chưa có Key)`;
+      }
       case "claude":
         if (config.claudeApiKey) {
           return `${config.claudeModel || "claude-sonnet-5"} (API Key)`;

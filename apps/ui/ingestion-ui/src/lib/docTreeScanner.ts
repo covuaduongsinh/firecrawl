@@ -9,7 +9,7 @@ export interface DocItem {
   depth: number;
   selected: boolean;
   status: 'idle' | 'scraping' | 'translating' | 'done' | 'error';
-  extractedData?: any;
+  extractedData?: unknown;
   markdownOutput?: string;
   error?: string;
 }
@@ -43,7 +43,7 @@ export function normalizeDocUrl(rawUrl: string): string {
     const urlObj = new URL(rawUrl);
     urlObj.hash = '';
     urlObj.search = '';
-    let path = urlObj.pathname.replace(/\/+$/, '');
+    const path = urlObj.pathname.replace(/\/+$/, '');
     return `${urlObj.origin}${path}`;
   } catch {
     return rawUrl.trim();
