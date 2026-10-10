@@ -23,11 +23,12 @@ import {
   AlertCircle,
   CheckCircle2,
   History,
+  ListPlus,
 } from 'lucide-react';
 import DocTreeView from '@/components/DocTreeView';
 import PromptBankSelector from '@/components/PromptBankSelector';
 import AIEngineSettings from '@/components/AIEngineSettings';
-import { DocCategory, DocItem, scanDocTree } from '@/lib/docTreeScanner';
+import { DocCategory, DocItem, scanDocTree, importCustomUrls } from '@/lib/docTreeScanner';
 import {
   exportToZip,
   exportToMergedMarkdown,
@@ -98,6 +99,8 @@ export default function BatchDocExtractor({
   const [rootUrl, setRootUrl] = useState<string>(loadLastRootUrl);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanMessage, setScanMessage] = useState<string | null>(null);
+  const [showCustomImport, setShowCustomImport] = useState<boolean>(false);
+  const [customUrlsText, setCustomUrlsText] = useState<string>('');
 
   // Tree State
   const [categories, setCategories] = useState<DocCategory[]>([]);
@@ -243,10 +246,15 @@ export default function BatchDocExtractor({
   const handleScanTree = async () => {
     if (!rootUrl.trim()) return;
     setIsScanning(true);
-    setScanMessage(null);
+    setScanMessage('Đang phân tích cấu trúc cây tài liệu...');
 
     try {
-      const scannedCategories = await scanDocTree(rootUrl.trim(), firecrawlApiUrl, apiKey);
+      const scannedCategories = await scanDocTree(
+        rootUrl.trim(),
+        firecrawlApiUrl,
+        apiKey,
+        (status) => setScanMessage(status)
+      );
       saveLastRootUrl(rootUrl.trim());
       replaceCategories(scannedCategories);
       setDownloadedCategorySlugs(new Set());
@@ -262,6 +270,24 @@ export default function BatchDocExtractor({
     } finally {
       setIsScanning(false);
     }
+  };
+
+  // Handle Import Custom URLs
+  const handleImportCustomUrls = () => {
+    if (!customUrlsText.trim()) return;
+    const importedCats = importCustomUrls(customUrlsText, rootUrl.trim() || 'https://docs.local');
+    if (importedCats.length === 0) {
+      alert('Không tìm thấy URL hợp lệ trong nội dung đã nhập.');
+      return;
+    }
+    replaceCategories(importedCats);
+    setDownloadedCategorySlugs(new Set());
+    downloadedCategorySlugsRef.current = new Set();
+    const totalItems = importedCats.reduce((acc, cat) => acc + cat.items.length, 0);
+    setScanMessage(`Đã nhập thành công ${importedCats.length} chuyên mục với ${totalItems} bài viết tùy chỉnh!`);
+    setActiveItemId(importedCats[0]?.items[0]?.id ?? null);
+    setShowCustomImport(false);
+    setCustomUrlsText('');
   };
 
   // Choose output folder (e.g. inside the Obsidian vault)
@@ -569,6 +595,17 @@ export default function BatchDocExtractor({
             )}
 
             <Button
+              variant="outline"
+              onClick={() => setShowCustomImport((prev) => !prev)}
+              disabled={isScanning || isRunning}
+              className="h-10 text-xs border-slate-700 bg-slate-900/60 text-slate-300 hover:bg-slate-800"
+              title="Nhập danh sách liên kết tài liệu thủ công (mỗi dòng 1 URL)"
+            >
+              <ListPlus className="h-4 w-4 mr-1.5 text-teal-400" />
+              Nhập URLs Tùy Chỉnh
+            </Button>
+
+            <Button
               onClick={handleScanTree}
               disabled={isScanning || isRunning || !rootUrl.trim()}
               className="h-10 px-5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium shadow-md transition-all"
@@ -586,6 +623,44 @@ export default function BatchDocExtractor({
               )}
             </Button>
           </div>
+
+          {showCustomImport && (
+            <div className="p-3 bg-slate-900/90 border border-slate-700/80 rounded-lg space-y-2.5">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs font-semibold text-slate-200">
+                  Nhập danh sách URLs tài liệu thủ công (mỗi dòng một đường dẫn):
+                </Label>
+                <span className="text-[11px] text-slate-400">
+                  Hỗ trợ cả link tuyệt đối và tương đối
+                </span>
+              </div>
+              <textarea
+                value={customUrlsText}
+                onChange={(e) => setCustomUrlsText(e.target.value)}
+                placeholder={`https://docs.paperclip.ing/guides/getting-started/five-minute-path/\nhttps://docs.paperclip.ing/guides/day-to-day/dashboard/\nhttps://docs.paperclip.ing/reference/api/overview/`}
+                rows={4}
+                className="w-full p-2.5 text-xs bg-slate-950 border border-slate-800 rounded-md text-slate-200 font-mono focus:ring-1 focus:ring-teal-500 focus:outline-none"
+              />
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowCustomImport(false)}
+                  className="h-7 text-xs text-slate-400 hover:text-slate-200"
+                >
+                  Đóng
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleImportCustomUrls}
+                  disabled={!customUrlsText.trim()}
+                  className="h-7 text-xs bg-teal-600 hover:bg-teal-500 text-white"
+                >
+                  Thêm Vào Cây Mục Lục
+                </Button>
+              </div>
+            </div>
+          )}
 
           {scanMessage && (
             <div className="text-xs text-emerald-400 bg-emerald-950/40 p-2.5 rounded-lg border border-emerald-800/60 flex items-center space-x-2">
