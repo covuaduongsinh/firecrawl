@@ -29,6 +29,13 @@ Never bypass `knip` failures (e.g. with `git commit --no-verify`). If the pre-co
 - Run the full stack with `docker compose up -d`.
 - Keep fork-specific changes inside `apps/ui/ingestion-ui` where possible, so syncing with upstream stays conflict-free.
 
+### Tài liệu dự án (`docs/`)
+
+- Bản đồ toàn hệ thống: `docs/TONG-QUAN-FIRECRAWL.md`. Danh sách tính năng và tiến độ tài liệu: `docs/PROGRESS.md`. Nhật ký các lượt làm việc và quyết định: `docs/LICH-SU-TUONG-TAC.md`. Tài liệu chuyên sâu từng tính năng: `docs/tinh-nang/`.
+- Đọc `docs/TONG-QUAN-FIRECRAWL.md` trước khi khảo sát repo; sau mỗi lượt làm việc đáng kể, thêm một mục vào đầu `docs/LICH-SU-TUONG-TAC.md`.
+- Tài liệu bám một commit cụ thể (ghi ở đầu mỗi file). Khi code đổi đáng kể, cập nhật tài liệu tương ứng hoặc ghi chú lệch commit.
+- `README.md` và `AGENTS.md` gốc là file upstream: không sửa để đồng bộ upstream không xung đột.
+
 ### `apps/ui/ingestion-ui`
 
 - Before pushing, run `pnpm build`, `pnpm test` and `pnpm lint` in `apps/ui/ingestion-ui`. `vite dev` does not typecheck, so only `pnpm build` catches type errors.
