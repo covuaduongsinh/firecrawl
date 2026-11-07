@@ -6,6 +6,26 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-07 — Triển khai cập nhật lên VPS qua Dokploy & SSH
+
+**Yêu cầu**: Cập nhật bản build mới nhất của phần mềm lên VPS `217.15.160.118` (domain `https://firecrawl.dsc.edu.vn`) qua Dokploy (`https://dokploy.dsc.edu.vn`) và SSH.
+
+**Thông số môi trường**:
+- VPS IP: `217.15.160.118`, SSH root qua khóa `C:\Users\duongsinh\.ssh\id_ed25519`.
+- Dokploy Project: `firecrawl-app` (`compose-navigate-online-bus-tlk6tz`, ID: `oaE7L3G64ZEqKRL4YvxAv`).
+- Dokploy API: Gọi deploy thành công qua endpoint `/api/compose.deploy` với `x-api-key`.
+- Domain công khai: `https://firecrawl.dsc.edu.vn`.
+
+**Đã làm**:
+- Lưu kế hoạch tại `docs/plans/2026-11-07-deploy-vps-dokploy-firecrawl-plan.md`.
+- Kết nối SSH vào VPS, kéo mã nguồn mới nhất từ GitHub (`git pull origin main` tại `/root/firecrawl` nhận commit `38297c332`).
+- Chạy `pnpm install --ignore-workspace` và build frontend bằng `tsc -b && vite build`.
+- Đồng bộ bundle tĩnh mới (`dist/*`) vào thư mục phục vụ web của Nginx (`/var/www/firecrawl-ui/`).
+- Khởi động lại container `ui` (`compose-navigate-online-bus-tlk6tz-ui-1`) và gửi trigger deploy qua Dokploy API.
+- Kiểm tra xác minh: `https://firecrawl.dsc.edu.vn` trả về HTTP 200, nạp đúng bundle JS mới (`index-BYNIS7Vu.js`), cầu nối CLI bridge (`/api/cli/status`) hoạt động hoàn hảo với `agy` và `claude`.
+
+---
+
 ## 2026-11-07 — Đồng bộ 435 commit từ Upstream vào Local và GitHub (Origin)
 
 **Yêu cầu**: Lên kế hoạch `/plan` và triển khai cập nhật, đồng bộ các thay đổi từ repository gốc (`upstream/main`) vào repository local (`main`) và GitHub (`origin/main`), đồng thời quy định từ nay mọi kế hoạch luôn được lưu tại thư mục `docs/plans/`.
