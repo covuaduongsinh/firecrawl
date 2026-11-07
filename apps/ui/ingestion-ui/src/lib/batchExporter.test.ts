@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   formatObsidianNote,
+  isValidTranslatedMarkdown,
+  readArticleFromDirectory,
   safeFileSlug,
+  syncWithOutputDirectory,
   writeArticleToDirectory,
   writeIndexToDirectory,
 } from "./batchExporter";
@@ -26,11 +29,39 @@ function item(id: string, extra: Partial<DocItem> = {}): DocItem {
 /** Minimal in-memory FileSystemDirectoryHandle. */
 function memoryDir(files: Map<string, string>, prefix = ""): FileSystemDirectoryHandle {
   return {
-    async getDirectoryHandle(name: string) {
-      return memoryDir(files, `${prefix}${name}/`);
+    async getDirectoryHandle(name: string, options?: { create?: boolean }) {
+      const targetPrefix = `${prefix}${name}/`;
+      const exists = Array.from(files.keys()).some((k) => k.startsWith(targetPrefix));
+      if (!exists && !options?.create) {
+        const err = new Error("Directory not found");
+        err.name = "NotFoundError";
+        throw err;
+      }
+      return memoryDir(files, targetPrefix);
     },
-    async getFileHandle(name: string) {
+    async getFileHandle(name: string, options?: { create?: boolean }) {
+      const key = `${prefix}${name}`;
+      const exists = files.has(key);
+      if (!exists && !options?.create) {
+        const err = new Error("File not found");
+        err.name = "NotFoundError";
+        throw err;
+      }
       return {
+        async getFile() {
+          const content = files.get(key);
+          if (content === undefined) {
+            const err = new Error("File not found");
+            err.name = "NotFoundError";
+            throw err;
+          }
+          return {
+            async text() {
+              return content;
+            },
+            size: content.length,
+          };
+        },
         async createWritable() {
           let data = "";
           return {
@@ -38,7 +69,7 @@ function memoryDir(files: Map<string, string>, prefix = ""): FileSystemDirectory
               data += chunk;
             },
             async close() {
-              files.set(`${prefix}${name}`, data);
+              files.set(key, data);
             },
           };
         },
@@ -95,3 +126,67 @@ describe("ghi thư mục", () => {
     expect(readme).not.toContain("s1");
   });
 });
+
+describe("isValidTranslatedMarkdown", () => {
+  it("trả về true nếu nội dung dài hơn 200 ký tự và không chứa chuỗi lỗi auth", () => {
+    const valid = "# Tiêu đề\n\nNội dung bài viết này được dịch rất chi tiết và đầy đủ để kiểm tra thuật toán phân loại bản dịch hợp lệ hay không. Chức năng này hỗ trợ nhiều đoạn văn bản phong phú.".repeat(2);
+    expect(isValidTranslatedMarkdown(valid)).toBe(true);
+  });
+
+  it("trả về false nếu nội dung quá ngắn hoặc rỗng", () => {
+    expect(isValidTranslatedMarkdown("")).toBe(false);
+    expect(isValidTranslatedMarkdown("quá ngắn")).toBe(false);
+    expect(isValidTranslatedMarkdown(null)).toBe(false);
+  });
+
+  it("trả về false nếu nội dung chứa chuỗi báo lỗi đăng nhập CLI", () => {
+    const errorOutput = "# Tiêu đề\n\nNot logged in · Please run /login để đăng nhập tài khoản của bạn.".repeat(5);
+    expect(isValidTranslatedMarkdown(errorOutput)).toBe(false);
+    expect(isValidTranslatedMarkdown("Failed to authenticate session with server".repeat(5))).toBe(false);
+  });
+});
+
+describe("syncWithOutputDirectory", () => {
+  it("nhận diện file hợp lệ trên đĩa và cập nhật status done, bỏ qua file lỗi 1KB", async () => {
+    const files = new Map<string, string>();
+    const validContent = "# Hướng dẫn Pages & Routes\n\nNội dung chi tiết về cách định tuyến các trang trong hệ thống... ".repeat(10);
+    const corruptedContent = "# Tiêu đề\n\nNot logged in · Please run /login";
+
+    // File s2 hợp lệ trên đĩa (category 1 -> folder 01-student)
+    files.set("01-student/02-s2.md", validContent);
+    // File s1 bị lỗi 1KB trên đĩa
+    files.set("01-student/01-s1.md", corruptedContent);
+
+    const testCategories: DocCategory[] = [
+      {
+        name: "Student",
+        slug: "student",
+        expanded: true,
+        selected: true,
+        items: [
+          item("s1", { status: "done", markdownOutput: corruptedContent }),
+          item("s2", { status: "idle", markdownOutput: undefined }),
+          item("s3", { status: "idle", markdownOutput: undefined }),
+        ],
+      },
+    ];
+
+    const result = await syncWithOutputDirectory(memoryDir(files), testCategories);
+
+    expect(result.matchedCount).toBe(1); // s2 matched
+    expect(result.invalidCount).toBe(1); // s1 invalid
+
+    const studentItems = result.categories[0].items;
+    // s2 được đánh dấu done và nạp content
+    expect(studentItems[1].status).toBe("done");
+    expect(studentItems[1].markdownOutput).toBe(validContent);
+
+    // s1 phát hiện bị lỗi nên được chuyển về idle để dịch lại
+    expect(studentItems[0].status).toBe("idle");
+    expect(studentItems[0].markdownOutput).toBeUndefined();
+
+    // s3 không có file trên đĩa vẫn giữ nguyên idle
+    expect(studentItems[2].status).toBe("idle");
+  });
+});
+

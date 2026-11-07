@@ -24,6 +24,7 @@ import {
   CheckCircle2,
   History,
   ListPlus,
+  RefreshCw,
 } from 'lucide-react';
 import DocTreeView from '@/components/DocTreeView';
 import PromptBankSelector from '@/components/PromptBankSelector';
@@ -41,6 +42,9 @@ import {
   pickOutputDirectory,
   writeArticleToDirectory,
   writeIndexToDirectory,
+  syncWithOutputDirectory,
+  isValidTranslatedMarkdown,
+  readArticleFromDirectory,
 } from '@/lib/batchExporter';
 import { AIEngineConfig, loadAIConfig } from '@/lib/aiEngines';
 import { processDocument } from '@/lib/documentProcessor';
@@ -133,6 +137,7 @@ export default function BatchDocExtractor({
   const [autoDownloadFormat, setAutoDownloadFormat] = useState<'zip' | 'merged_md'>('zip');
   const [exportFlavor, setExportFlavor] = useState<ExportFlavor>('obsidian');
   const [outputDir, setOutputDir] = useState<FileSystemDirectoryHandle | null>(null);
+  const [isSyncingFolder, setIsSyncingFolder] = useState<boolean>(false);
   const [downloadedCategorySlugs, setDownloadedCategorySlugs] = useState<Set<string>>(new Set());
   const [savedSessionInfo, setSavedSessionInfo] = useState<{ count: number; date: string } | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -242,6 +247,29 @@ export default function BatchDocExtractor({
     }
   };
 
+  // Đồng bộ hai chiều với các file đã có trong thư mục lưu trữ
+  const handleSyncFolder = async (dirToSync?: FileSystemDirectoryHandle | null) => {
+    const dir = dirToSync ?? outputDir;
+    if (!dir || categoriesRef.current.length === 0) return;
+    setIsSyncingFolder(true);
+    try {
+      const result = await syncWithOutputDirectory(dir, categoriesRef.current);
+      replaceCategories(result.categories);
+      if (result.matchedCount > 0) {
+        setScanMessage(
+          `✓ Đã đồng bộ với thư mục "${dir.name}": nhận diện ${result.matchedCount} bài đã dịch xong` +
+          (result.invalidCount > 0 ? `, phát hiện ${result.invalidCount} bài lỗi cũ sẽ được dịch lại.` : '.')
+        );
+      } else if (result.invalidCount > 0) {
+        setScanMessage(`Phát hiện ${result.invalidCount} file lỗi cũ trong thư mục, hệ thống sẽ tự động dịch lại.`);
+      }
+    } catch (err) {
+      console.warn('Lỗi khi đồng bộ thư mục:', err);
+    } finally {
+      setIsSyncingFolder(false);
+    }
+  };
+
   // Handle Scan Doc Tree
   const handleScanTree = async () => {
     if (!rootUrl.trim()) return;
@@ -256,15 +284,56 @@ export default function BatchDocExtractor({
         (status) => setScanMessage(status)
       );
       saveLastRootUrl(rootUrl.trim());
-      replaceCategories(scannedCategories);
+
+      // Hợp nhất thông minh: bảo toàn các bài viết đã hoàn thành trong bộ nhớ
+      const existingDoneMap = new Map<string, DocItem>();
+      for (const cat of categoriesRef.current) {
+        for (const item of cat.items) {
+          if (item.status === 'done' && isValidTranslatedMarkdown(item.markdownOutput)) {
+            existingDoneMap.set(item.url, item);
+            if (item.slug) existingDoneMap.set(item.slug, item);
+          }
+        }
+      }
+
+      let mergedCategories = scannedCategories.map((cat) => ({
+        ...cat,
+        items: cat.items.map((it) => {
+          const existing = existingDoneMap.get(it.url) || (it.slug ? existingDoneMap.get(it.slug) : undefined);
+          if (existing) {
+            return {
+              ...it,
+              status: 'done' as const,
+              markdownOutput: existing.markdownOutput,
+              extractedData: existing.extractedData,
+              tokensUsed: existing.tokensUsed,
+            };
+          }
+          return it;
+        }),
+      }));
+
+      // Nếu đã chọn thư mục, đối chiếu tiếp với các file thực tế trên đĩa
+      if (outputDir) {
+        try {
+          const syncRes = await syncWithOutputDirectory(outputDir, mergedCategories);
+          mergedCategories = syncRes.categories;
+        } catch (syncErr) {
+          console.warn('Lỗi đồng bộ thư mục khi quét mục lục:', syncErr);
+        }
+      }
+
+      replaceCategories(mergedCategories);
       setDownloadedCategorySlugs(new Set());
       downloadedCategorySlugsRef.current = new Set();
 
-      const totalItems = scannedCategories.reduce((acc, cat) => acc + cat.items.length, 0);
+      const totalItems = mergedCategories.reduce((acc, cat) => acc + cat.items.length, 0);
+      const totalDone = countDoneItems(mergedCategories);
       setScanMessage(
-        `Đã quét thành công ${scannedCategories.length} chuyên mục với ${totalItems} bài viết!`
+        `Đã quét thành công ${mergedCategories.length} chuyên mục với ${totalItems} bài viết` +
+        (totalDone > 0 ? ` (Đã có ${totalDone} bài dịch xong sẵn sàng)!` : '!')
       );
-      setActiveItemId(scannedCategories[0]?.items[0]?.id ?? null);
+      setActiveItemId(mergedCategories[0]?.items[0]?.id ?? null);
     } catch (err) {
       setScanMessage(`Lỗi quét cây mục lục: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -295,6 +364,8 @@ export default function BatchDocExtractor({
     try {
       const dir = await pickOutputDirectory();
       setOutputDir(dir);
+      // Tự động quét và đồng bộ với các bài đã có trong thư mục
+      await handleSyncFolder(dir);
       return dir;
     } catch (err) {
       if (!isAbortError(err)) {
@@ -311,6 +382,34 @@ export default function BatchDocExtractor({
     dir: FileSystemDirectoryHandle | null
   ): Promise<boolean> => {
     const previous = { status: item.status, markdownOutput: item.markdownOutput };
+
+    // Kiểm tra an toàn: nếu file đã tồn tại trên đĩa và hợp lệ, lập tức đánh dấu done và bỏ qua không gọi AI
+    if (dir && skipDone) {
+      try {
+        const catIdx =
+          categoriesRef.current.findIndex(
+            (c) => c.slug === item.categorySlug || c.items.some((i) => i.id === item.id)
+          ) + 1;
+        if (catIdx > 0) {
+          const cat = categoriesRef.current[catIdx - 1];
+          const itIdx = cat.items.findIndex((i) => i.id === item.id) + 1;
+          if (itIdx > 0) {
+            const onDisk = await readArticleFromDirectory(dir, cat, catIdx, item, itIdx);
+            if (onDisk.exists && onDisk.valid && onDisk.content) {
+              updateItem(item.id, {
+                status: 'done',
+                markdownOutput: onDisk.content,
+                error: undefined,
+              });
+              return true;
+            }
+          }
+        }
+      } catch (checkErr) {
+        console.warn('Lỗi kiểm tra file trên đĩa:', checkErr);
+      }
+    }
+
     try {
       updateItem(item.id, { status: 'scraping', error: undefined });
       const rawMarkdown = await scrapePageMarkdown(item.url, firecrawlApiUrl, apiKey, signal);
@@ -430,6 +529,16 @@ export default function BatchDocExtractor({
 
   // Batch Runner
   const handleStartBatch = async () => {
+    // Nếu có outputDir và đang bật skipDone, thực hiện đồng bộ lại lần cuối trước khi xếp hàng
+    if (outputDir && skipDone) {
+      try {
+        const syncRes = await syncWithOutputDirectory(outputDir, categoriesRef.current);
+        replaceCategories(syncRes.categories);
+      } catch (err) {
+        console.warn('Lỗi đồng bộ trước khi chạy batch:', err);
+      }
+    }
+
     const selected: { catSlug: string; item: DocItem }[] = [];
     for (const cat of categoriesRef.current) {
       for (const item of cat.items) {
@@ -441,7 +550,9 @@ export default function BatchDocExtractor({
       return;
     }
     const queue = skipDone
-      ? selected.filter(({ item }) => !(item.status === 'done' && item.markdownOutput))
+      ? selected.filter(
+          ({ item }) => !(item.status === 'done' && isValidTranslatedMarkdown(item.markdownOutput))
+        )
       : selected;
     if (queue.length === 0) {
       alert('Tất cả bài đã chọn đều đã dịch xong. Bỏ chọn "Bỏ qua bài đã dịch" nếu muốn dịch lại.');
@@ -501,7 +612,11 @@ export default function BatchDocExtractor({
     0
   );
   const totalDone = categories.reduce(
-    (acc, cat) => acc + cat.items.filter((i) => i.selected && (i.status === 'done' || !!i.markdownOutput)).length,
+    (acc, cat) =>
+      acc +
+      cat.items.filter(
+        (i) => i.selected && i.status === 'done' && isValidTranslatedMarkdown(i.markdownOutput)
+      ).length,
     0
   );
   const totalPending = totalSelected - totalDone;
@@ -828,17 +943,33 @@ export default function BatchDocExtractor({
               </label>
 
               {autoSaveMode === 'folder' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={isRunning}
-                  onClick={() => void chooseOutputDir()}
-                  className="h-7 text-xs border-slate-700 hover:bg-slate-800 text-slate-200"
-                  title="Chọn thư mục đích, ví dụ một thư mục trong vault Obsidian"
-                >
-                  <FolderTree className="h-3.5 w-3.5 mr-1.5 text-emerald-400" />
-                  {outputDir ? `Thư mục: ${outputDir.name}` : 'Chọn thư mục...'}
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isRunning}
+                    onClick={() => void chooseOutputDir()}
+                    className="h-7 text-xs border-slate-700 hover:bg-slate-800 text-slate-200"
+                    title="Chọn thư mục đích, ví dụ một thư mục trong vault Obsidian"
+                  >
+                    <FolderTree className="h-3.5 w-3.5 mr-1.5 text-emerald-400" />
+                    {outputDir ? `Thư mục: ${outputDir.name}` : 'Chọn thư mục...'}
+                  </Button>
+
+                  {outputDir && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isRunning || isSyncingFolder}
+                      onClick={() => void handleSyncFolder()}
+                      className="h-7 text-xs border-emerald-700/80 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/60"
+                      title="Quét lại các file đã có trong thư mục để tự động đánh dấu hoàn thành và bỏ qua"
+                    >
+                      <RefreshCw className={`h-3 w-3 mr-1 ${isSyncingFolder ? 'animate-spin' : ''}`} />
+                      {isSyncingFolder ? 'Đang quét...' : 'Đồng bộ thư mục'}
+                    </Button>
+                  )}
+                </div>
               )}
 
               {autoSaveMode === 'download' && (

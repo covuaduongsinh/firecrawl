@@ -453,3 +453,121 @@ export async function writeIndexToDirectory(
   });
   await writeTextFile(dir, 'README.md', lines.join('\n'));
 }
+
+/**
+ * Kiểm tra xem nội dung markdown có phải là bản dịch hợp lệ hay không.
+ * Từ chối nếu nội dung quá ngắn (< 200 ký tự) hoặc chứa chuỗi báo lỗi đăng nhập / auth CLI.
+ */
+export function isValidTranslatedMarkdown(content: string | null | undefined): boolean {
+  if (!content) return false;
+  const trimmed = content.trim();
+  if (trimmed.length < 200) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.includes('not logged in') ||
+    lower.includes('please run /login') ||
+    lower.includes('failed to authenticate') ||
+    lower.includes('claude code cli chưa đăng nhập')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Đọc một bài viết từ cấu trúc thư mục trên đĩa cứng:
+ * `<dir>/<NN-category>/<NN-article>.md`.
+ */
+export async function readArticleFromDirectory(
+  dir: FileSystemDirectoryHandle,
+  category: DocCategory,
+  categoryIndex: number,
+  item: DocItem,
+  itemIndex: number
+): Promise<{ exists: boolean; valid: boolean; content: string | null }> {
+  try {
+    const folderName = categoryFolderName(category, categoryIndex);
+    const folder = await dir.getDirectoryHandle(folderName);
+    const fileName = articleFileName(item, itemIndex);
+    const fileHandle = await folder.getFileHandle(fileName);
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    const valid = isValidTranslatedMarkdown(text);
+    return { exists: true, valid, content: text };
+  } catch {
+    return { exists: false, valid: false, content: null };
+  }
+}
+
+/**
+ * Đồng bộ hai chiều trạng thái danh mục cây tài liệu với thư mục lưu trữ trên đĩa.
+ * Tự động gán `status = 'done'` và nạp `markdownOutput` cho các bài đã dịch hợp lệ trên đĩa,
+ * giúp người dùng không bao giờ bị dịch lại bài cũ và tiết kiệm token tối đa.
+ */
+export async function syncWithOutputDirectory(
+  dir: FileSystemDirectoryHandle,
+  categories: DocCategory[]
+): Promise<{
+  categories: DocCategory[];
+  matchedCount: number;
+  invalidCount: number;
+  totalChecked: number;
+}> {
+  let matchedCount = 0;
+  let invalidCount = 0;
+  let totalChecked = 0;
+
+  const nextCategories: DocCategory[] = [];
+
+  for (let c = 0; c < categories.length; c++) {
+    const category = categories[c];
+    const catIndex = c + 1;
+    const nextItems: DocItem[] = [];
+
+    for (let i = 0; i < category.items.length; i++) {
+      const item = category.items[i];
+      const itemIndex = i + 1;
+      totalChecked++;
+
+      // Nếu bài đã có nội dung dịch hợp lệ trong memory, giữ nguyên
+      if (item.status === 'done' && isValidTranslatedMarkdown(item.markdownOutput)) {
+        nextItems.push(item);
+        matchedCount++;
+        continue;
+      }
+
+      const res = await readArticleFromDirectory(dir, category, catIndex, item, itemIndex);
+      if (res.exists && res.valid && res.content) {
+        matchedCount++;
+        nextItems.push({
+          ...item,
+          status: 'done',
+          markdownOutput: res.content,
+          error: undefined,
+        });
+      } else {
+        if (res.exists && !res.valid) {
+          invalidCount++;
+        }
+        nextItems.push({
+          ...item,
+          status: item.status === 'done' && !isValidTranslatedMarkdown(item.markdownOutput) ? 'idle' : item.status,
+          markdownOutput: isValidTranslatedMarkdown(item.markdownOutput) ? item.markdownOutput : undefined,
+        });
+      }
+    }
+
+    nextCategories.push({
+      ...category,
+      items: nextItems,
+    });
+  }
+
+  return {
+    categories: nextCategories,
+    matchedCount,
+    invalidCount,
+    totalChecked,
+  };
+}
+

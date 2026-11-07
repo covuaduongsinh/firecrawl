@@ -6,6 +6,33 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-07 — Ngăn chặn dịch lại bài đã dịch & Tự động đồng bộ với thư mục trên máy
+
+**Yêu cầu**: Sửa lỗi nhiều bài viết đã dịch xong trên máy tính nhưng hệ thống vẫn tiếp tục xếp vào hàng đợi dịch lại (123 bài thay vì 94 bài còn thiếu), làm tốn token và ghi đè lên các bài dịch tốt cũ.
+
+**Nguyên nhân gốc rễ**:
+1. Ứng dụng chỉ dùng `FileSystemDirectoryHandle` theo một chiều ghi (`writeArticleToDirectory`), không có cơ chế đọc ngược từ ổ đĩa để nhận diện các bài `.md` đã tồn tại.
+2. Mỗi lần người dùng bấm "Quét Cây Mục Lục", ứng dụng tạo mới danh sách và ghi đè bộ nhớ đệm IndexedDB bằng danh sách trống (`status: 'idle'`).
+3. Bộ lọc `skipDone` chỉ dựa trên bộ nhớ RAM, khi RAM bị reset thì toàn bộ bài viết bị đưa vào hàng đợi dịch lại.
+4. Một số bài dịch bị lỗi 1KB trước đó (chứa thông báo `Not logged in`) cần được nhận diện để dịch lại, còn bài hợp lệ (> 1.5KB) phải được bỏ qua.
+
+**Đã làm**:
+- Kế hoạch kỹ thuật lưu tại: `docs/plans/2026-11-07-fix-duplicate-translation-and-folder-sync-plan.md`.
+- Bổ sung vào `apps/ui/ingestion-ui/src/lib/batchExporter.ts`:
+  + `isValidTranslatedMarkdown`: Kiểm tra tính hợp lệ của bản dịch (độ dài >= 200 ký tự và không chứa chuỗi lỗi CLI).
+  + `readArticleFromDirectory`: Đọc trực tiếp file bài viết từ thư mục đĩa theo cấu trúc `<NN-category>/<NN-article>.md`.
+  + `syncWithOutputDirectory`: Đồng bộ toàn bộ cây mục lục với ổ đĩa, tự động đánh dấu `done` và nạp nội dung cho các bài viết hợp lệ, giữ `idle` cho bài rác 1KB để dịch lại.
+- Bổ sung unit tests trong `batchExporter.test.ts` (8/8 tests passed).
+- Cập nhật `apps/ui/ingestion-ui/src/components/BatchDocExtractor.tsx`:
+  + Tự động kích hoạt đồng bộ ngay khi người dùng chọn thư mục (`chooseOutputDir`).
+  + Bổ sung nút bấm `🔄 Đồng bộ thư mục` trên thanh công cụ.
+  + Hợp nhất thông minh trong `handleScanTree`: giữ nguyên trạng thái các bài đã `done` và tự động đối chiếu với thư mục đã chọn nếu có.
+  + Kiểm tra an toàn trước khi chạy (`handleStartBatch`) và trong từng tác vụ (`processSingleItem`): bỏ qua ngay lập tức nếu file trên đĩa đã hợp lệ.
+  + Cập nhật công thức tính `totalDone` loại trừ file hỏng 1KB.
+- Build và triển khai bản cập nhật lên VPS, đồng bộ vào `/var/www/firecrawl-ui/`.
+
+---
+
 ## 2026-11-07 — Kích hoạt gói thuê bao Claude Max (Claude Code CLI) trên VPS
 
 **Yêu cầu**: Người dùng muốn sử dụng gói thuê bao Claude Code thay vì trả tiền API token và gặp lỗi "Chưa có Key / Chưa tìm thấy claude.exe".
