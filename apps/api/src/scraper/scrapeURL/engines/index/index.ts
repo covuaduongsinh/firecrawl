@@ -29,7 +29,14 @@ import {
   useIndexNegativeCache,
   type IndexCacheEntry,
 } from "../../../../services/index-cache";
-import { indexLookupCounter } from "../../../../lib/index-cache-metrics";
+import {
+  indexLookupCounter,
+  indexPdfSupersedeCounter,
+} from "../../../../lib/index-cache-metrics";
+import {
+  cacheServiceConfigured,
+  checkFirePdfSupersedes,
+} from "../pdf/fire-pdf/cache-service";
 import {
   AgentIndexOnlyError,
   EngineError,
@@ -120,7 +127,6 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
             meta.rewrittenUrl ??
             meta.url,
           html: document.rawHtml!,
-          json: document.json,
           statusCode: document.metadata.statusCode,
           error: document.metadata.error,
           screenshot: document.screenshot,
@@ -136,6 +142,10 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
           contentType: document.metadata.contentType,
           postprocessorsUsed: document.metadata.postprocessorsUsed,
           proxyUsed: document.metadata.proxyUsed,
+          ...(meta.firePdfCacheKey?.current !== undefined &&
+          document.metadata.contentType === "application/pdf"
+            ? { firePdfCacheKey: meta.firePdfCacheKey.current }
+            : {}),
         });
       } catch (error) {
         meta.logger.error("Failed to save document to index", {
@@ -578,6 +588,33 @@ export async function scrapeURLWithIndex(
     throw new IndexMissError();
   }
 
+  // fire-pdf may have re-parsed this PDF since it was indexed (a refresh or a
+  // campaign). Only once a fresh entry exists is the index copy skipped, so
+  // the request lands on that entry without a parse and is re-indexed.
+  if (
+    config.INDEX_PDF_SUPERSEDE_CHECK &&
+    typeof doc.firePdfCacheKey === "string" &&
+    doc.contentType === "application/pdf" &&
+    !isCachedPdfBase64 &&
+    cacheServiceConfigured()
+  ) {
+    const result = await checkFirePdfSupersedes(
+      meta,
+      doc.firePdfCacheKey,
+      new Date(selectedRow.created_at),
+    );
+    indexPdfSupersedeCounter.inc({ result });
+    if (result === "superseded") {
+      // The DB path may have just written this id through to Dragonfly.
+      deleteCachedIndexEntry(variantKey, id, meta.logger).catch(() => {});
+      logLookup("debug", "hit", {
+        pdfSuperseded: true,
+        indexDocumentId: id,
+      });
+      throw new IndexMissError();
+    }
+  }
+
   logLookup("debug", "hit", {
     age: Date.now() - new Date(selectedRow.created_at).getTime(),
     status: selectedRow.status,
@@ -588,7 +625,6 @@ export async function scrapeURLWithIndex(
   return {
     url: doc.url,
     html: doc.html,
-    json: doc.json,
     statusCode: doc.statusCode,
     error: doc.error,
     screenshot: doc.screenshot,

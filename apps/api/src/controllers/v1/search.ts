@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { config } from "../../config";
+import { timingSafeSecretEqual } from "../../lib/secret-compare";
 import {
   Document,
   RequestWithAuth,
@@ -45,6 +46,8 @@ import {
 } from "../../lib/keyless";
 import { projectSearchTotalCredits } from "../../lib/keyless-credit-projection";
 import { applyAgentAuthDiscoveryHeader } from "../../lib/agent-auth-discovery";
+import { isUsOnly, usOnlyLocationRefusal } from "../../lib/us-only";
+import { UsOnlyUnavailableError } from "../../scraper/scrapeURL/error";
 
 // Used for deep research
 export async function searchAndScrapeSearchResult(
@@ -66,6 +69,7 @@ export async function searchAndScrapeSearchResult(
       query,
       logger,
       num_results: 5,
+      usOnly: isUsOnly(flags),
     });
 
     const { scrapeOptions } = fromV1ScrapeOptions(
@@ -130,9 +134,10 @@ export async function searchController(
     id: jobId,
   };
   const middlewareTime = controllerStartTime - middlewareStartTime;
-  const isSearchPreview =
-    config.SEARCH_PREVIEW_TOKEN !== undefined &&
-    config.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+  const isSearchPreview = timingSafeSecretEqual(
+    req.body.__searchPreviewToken,
+    config.SEARCH_PREVIEW_TOKEN,
+  );
   let reservedKeylessCredits = 0;
   let reconciledKeylessCredits = false;
 
@@ -192,6 +197,22 @@ export async function searchController(
       return res.status(403).json({
         success: false,
         error: threatProtection.error,
+      });
+    }
+
+    const usOnlyLocationError =
+      requestedFormats.length > 0
+        ? usOnlyLocationRefusal(
+            req.acuc?.flags,
+            req.body.scrapeOptions?.location?.country,
+            req.body.scrapeOptions?.geolocation?.country,
+          )
+        : undefined;
+    if (usOnlyLocationError) {
+      return res.status(403).json({
+        success: false,
+        code: "US_ONLY_UNAVAILABLE",
+        error: usOnlyLocationError,
       });
     }
 
@@ -264,7 +285,7 @@ export async function searchController(
         applyAgentAuthDiscoveryHeader(res);
         return res
           .status(429)
-          .json(await keylessLimitBody(req.auth.team_id, "v1_search"));
+          .json(await keylessLimitBody(req.auth.team_id, "v1_search", req));
       }
       reservedKeylessCredits = projectedKeylessCredits;
     }
@@ -363,27 +384,24 @@ export async function searchController(
     const endTime = new Date().getTime();
     const timeTakenInSeconds = (endTime - middlewareStartTime) / 1000;
 
-    logSearch(
-      {
-        id: jobId,
-        request_id: jobId,
-        query: req.body.query,
-        is_successful: true,
-        error: undefined,
-        results: responseData.data,
-        num_results: responseData.data.length,
-        time_taken: timeTakenInSeconds,
-        team_id: req.auth.team_id,
-        options: {
-          ...req.body,
-          query: undefined,
-          scrapeOptions: undefined,
-        },
-        credits_cost: result.searchCredits,
-        zeroDataRetention,
+    logSearch({
+      id: jobId,
+      request_id: jobId,
+      query: req.body.query,
+      is_successful: true,
+      error: undefined,
+      results: responseData.data,
+      num_results: responseData.data.length,
+      time_taken: timeTakenInSeconds,
+      team_id: req.auth.team_id,
+      options: {
+        ...req.body,
+        query: undefined,
+        scrapeOptions: undefined,
       },
-      false,
-    ).catch(error => {
+      credits_cost: result.searchCredits,
+      zeroDataRetention,
+    }).catch(error => {
       logger.error("Failed to log search", { error, jobId });
     });
 
@@ -423,6 +441,14 @@ export async function searchController(
 
     if (error instanceof ScrapeJobTimeoutError) {
       return res.status(408).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+      });
+    }
+
+    if (error instanceof UsOnlyUnavailableError) {
+      return res.status(403).json({
         success: false,
         code: error.code,
         error: error.message,

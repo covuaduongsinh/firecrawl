@@ -9,7 +9,21 @@ const mocks = vi.hoisted(() => ({
   // Receives (tableName, rows[]) for every insert issued inside the transaction.
   insert: vi.fn(),
   recordEndpointFeedback: vi.fn(),
+  refundAlexandriaFeedback: vi.fn(),
+  hasRecentAlexandriaActivity: vi.fn(),
+  getRecentAlexandriaCalls: vi.fn(),
+  forwardExchangeToolFeedback: vi.fn(),
   logError: vi.fn(),
+}));
+vi.mock("./alexandria-refund", () => ({
+  refundAlexandriaFeedback: mocks.refundAlexandriaFeedback,
+}));
+vi.mock("../../../lib/alexandria-activity", () => ({
+  hasRecentAlexandriaActivity: mocks.hasRecentAlexandriaActivity,
+  getRecentAlexandriaCalls: mocks.getRecentAlexandriaCalls,
+}));
+vi.mock("../../../lib/exchange", () => ({
+  forwardExchangeToolFeedback: mocks.forwardExchangeToolFeedback,
 }));
 vi.mock("../../../db/connection", () => ({
   db: { transaction: mocks.transaction },
@@ -27,6 +41,7 @@ const inserted = (table: string) =>
 const parentRows = () => inserted("alexandria_feedback");
 const providerRows = () => inserted("alexandria_feedback_providers");
 const capabilityRows = () => inserted("alexandria_feedback_capabilities");
+const callRows = () => inserted("alexandria_feedback_calls");
 vi.mock("../../../lib/logger", () => ({ logger: { error: mocks.logError } }));
 vi.mock("./record", () => ({
   recordEndpointFeedback: mocks.recordEndpointFeedback,
@@ -37,6 +52,7 @@ vi.mock("./record-options", () => ({
 
 import { config } from "../../../config";
 import { feedbackController } from "./controller";
+import { issueFeedbackToken } from "../../../lib/alexandria-feedback-token";
 
 const minimal = {
   endpoint: "alexandria",
@@ -58,7 +74,7 @@ app.use(express.json());
 app.use((req, _res, next) => {
   Object.assign(req, {
     auth: { team_id: authTeam },
-    acuc: { api_key_id: 42, flags },
+    acuc: { api_key_id: 42, org_id: "org-1", flags },
   });
   next();
 });
@@ -74,23 +90,39 @@ beforeEach(() => {
     async (run: (tx: unknown) => Promise<void>) => run(tx),
   );
   mocks.insert.mockResolvedValue(undefined);
+  mocks.hasRecentAlexandriaActivity.mockResolvedValue(true);
+  mocks.getRecentAlexandriaCalls.mockResolvedValue([]);
+  mocks.refundAlexandriaFeedback.mockResolvedValue({
+    creditsRefunded: 1,
+    creditsRefundedToday: 1,
+    dailyRefundCap: 10,
+  });
 });
 afterAll(() => {
   config.USE_DB_AUTHENTICATION = originalDbAuthentication;
 });
 
 it.each(["good", "partial", "bad"])(
-  "records a %s session without job lookup or refund",
+  "records a %s session without job lookup and refunds it",
   async rating => {
     const response = await submit({ ...minimal, rating });
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
       success: true,
       feedbackId: expect.any(String),
-      creditsRefunded: 0,
+      creditsRefunded: 1,
+      creditsRefundedToday: 1,
+      dailyRefundCap: 10,
     });
     expect(mocks.recordEndpointFeedback).not.toHaveBeenCalled();
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.refundAlexandriaFeedback).toHaveBeenCalledExactlyOnceWith({
+      feedbackId: response.body.feedbackId,
+      teamId,
+      orgId: "org-1",
+      rating,
+      requestedUrl: minimal.requestedWebsite.url,
+    });
     expect(parentRows()).toEqual([
       {
         id: response.body.feedbackId,
@@ -102,6 +134,7 @@ it.each(["good", "partial", "bad"])(
         requested_functionality:
           minimal.requestedWebsite.requestedFunctionality,
         rationale: minimal.rationale,
+        objective: null,
         origin: "api",
         integration: null,
         schema_version: 2,
@@ -109,8 +142,22 @@ it.each(["good", "partial", "bad"])(
     ]);
     expect(providerRows()).toEqual([]);
     expect(capabilityRows()).toEqual([]);
+    expect(callRows()).toEqual([]);
   },
 );
+
+it("records the trimmed objective behind the session", async () => {
+  const response = await submit({
+    ...minimal,
+    objective: "  Build a list of open federal IT contracts to bid on.  ",
+  });
+  expect(response.status).toBe(200);
+  expect(parentRows()).toEqual([
+    expect.objectContaining({
+      objective: "Build a list of open federal IT contracts to bid on.",
+    }),
+  ]);
+});
 
 it.each(["endpoint", "rating", "requestedWebsite", "rationale"])(
   "requires %s",
@@ -179,6 +226,9 @@ it.each([
   { requestedVertical: "government" },
   { rationale: " " },
   { rationale: "x".repeat(2001) },
+  { objective: " " },
+  { objective: "x".repeat(2001) },
+  { objective: ["Find contracts"] },
   { rating: true },
   { jobId },
   { endpoint: "search", jobId },
@@ -568,7 +618,65 @@ it.each([
   const response = await submit(minimal);
   expect(response.status).toBe(200);
   expect(response.body.feedbackId).toBe("00000000-0000-0000-0000-000000000000");
+  expect(response.body.creditsRefunded).toBe(0);
   expect(mocks.transaction).not.toHaveBeenCalled();
+  expect(mocks.refundAlexandriaFeedback).not.toHaveBeenCalled();
+  expect(mocks.getRecentAlexandriaCalls).not.toHaveBeenCalled();
+  expect(mocks.forwardExchangeToolFeedback).not.toHaveBeenCalled();
+});
+
+it("returns the refund outcome, including cap and duplicate warnings", async () => {
+  const outcome = {
+    creditsRefunded: 0,
+    creditsRefundedToday: 10,
+    dailyRefundCap: 10,
+    dailyCapReached: true,
+    warning: "Daily Alexandria feedback refund cap reached.",
+  };
+  mocks.refundAlexandriaFeedback.mockResolvedValueOnce(outcome);
+  const response = await submit(minimal);
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({
+    success: true,
+    feedbackId: expect.any(String),
+    ...outcome,
+  });
+});
+
+it("rejects feedback outside the window after the team's last Alexandria call", async () => {
+  mocks.hasRecentAlexandriaActivity.mockResolvedValue(false);
+  const response = await submit(minimal);
+  expect(response.status).toBe(409);
+  expect(response.body).toEqual({
+    success: false,
+    feedbackErrorCode: "FEEDBACK_WINDOW_EXPIRED",
+    error: `Alexandria feedback must be submitted within ${config.ALEXANDRIA_FEEDBACK_WINDOW_SEC} seconds of an Alexandria search, discovery, or execution, or name its calls with valid feedback tokens.`,
+  });
+  expect(mocks.hasRecentAlexandriaActivity).toHaveBeenCalledWith(teamId);
+  expect(mocks.transaction).not.toHaveBeenCalled();
+  expect(mocks.refundAlexandriaFeedback).not.toHaveBeenCalled();
+  expect(mocks.forwardExchangeToolFeedback).not.toHaveBeenCalled();
+});
+
+it("fails closed when the feedback window cannot be checked", async () => {
+  const error = new Error("redis down");
+  mocks.hasRecentAlexandriaActivity.mockRejectedValue(error);
+  const response = await submit(minimal);
+  expect(response.status).toBe(500);
+  expect(response.body.feedbackErrorCode).toBe("INTERNAL");
+  expect(mocks.logError).toHaveBeenCalledWith(
+    "Failed to check the Alexandria feedback window",
+    { error, teamId },
+  );
+  expect(mocks.transaction).not.toHaveBeenCalled();
+  expect(mocks.refundAlexandriaFeedback).not.toHaveBeenCalled();
+});
+
+it("validates the body before checking the window", async () => {
+  mocks.hasRecentAlexandriaActivity.mockResolvedValue(false);
+  const response = await submit({ ...minimal, rationale: undefined });
+  expect(response.status).toBe(400);
+  expect(mocks.hasRecentAlexandriaActivity).not.toHaveBeenCalled();
 });
 
 it("honors team opt-out", async () => {
@@ -577,6 +685,7 @@ it("honors team opt-out", async () => {
   expect(response.status).toBe(403);
   expect(response.body.feedbackErrorCode).toBe("TEAM_OPTED_OUT");
   expect(mocks.transaction).not.toHaveBeenCalled();
+  expect(mocks.refundAlexandriaFeedback).not.toHaveBeenCalled();
 });
 
 it.each(["preview", "preview_example", "preview_keyless_example"])(
@@ -627,6 +736,8 @@ it.each([
   );
   expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain("sensitive");
   expect(mocks.recordEndpointFeedback).not.toHaveBeenCalled();
+  expect(mocks.refundAlexandriaFeedback).not.toHaveBeenCalled();
+  expect(mocks.forwardExchangeToolFeedback).not.toHaveBeenCalled();
 });
 
 it.each(["search", "scrape", "parse", "map"])(
@@ -652,3 +763,245 @@ it.each(["search", "scrape", "parse", "map"])(
     expect(mocks.transaction).not.toHaveBeenCalled();
   },
 );
+
+describe("call attribution", () => {
+  const now = 1_800_000_000_000;
+  const originalSecret = config.EXCHANGE_INTERNAL_SECRET;
+  const recent = (requestId: string, provider: string, ageSec: number) => ({
+    requestId,
+    provider,
+    capability: "lookup",
+    at: now - ageSec * 1000,
+  });
+  const token = (
+    requestId: string,
+    provider: string,
+    options: { team?: string; at?: number } = {},
+  ) =>
+    issueFeedbackToken(
+      {
+        requestId,
+        teamId: options.team ?? teamId,
+        provider,
+        capability: "lookup",
+      },
+      options.at ?? now - 60_000,
+    )!;
+  const callRow = (
+    position: number,
+    request_id: string,
+    provider: string,
+    attribution: string,
+    rating: string | null = null,
+  ) => ({
+    feedback_id: expect.any(String),
+    team_id: teamId,
+    position,
+    request_id,
+    provider,
+    capability: "lookup",
+    rating,
+    attribution,
+  });
+  let originalWindow: number;
+  let clock: { mockRestore: () => void };
+  beforeEach(() => {
+    originalWindow = config.ALEXANDRIA_FEEDBACK_WINDOW_SEC;
+    config.ALEXANDRIA_FEEDBACK_WINDOW_SEC = 1200;
+    config.EXCHANGE_INTERNAL_SECRET = "internal-secret";
+    clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    mocks.getRecentAlexandriaCalls.mockResolvedValue([
+      recent("req-3", "sec", 10),
+      recent("req-2", "fred", 60),
+      recent("req-2", "bls", 60),
+      recent("req-3", "sec", 120),
+      recent("req-1", "census", 1500),
+    ]);
+  });
+  afterEach(() => {
+    config.ALEXANDRIA_FEEDBACK_WINDOW_SEC = originalWindow;
+    config.EXCHANGE_INTERNAL_SECRET = originalSecret;
+    clock.mockRestore();
+  });
+
+  it("attributes to the calls named by valid tokens, with per-call ratings", async () => {
+    const fred = token("req-2", "fred");
+    const sec = token("req-3", "sec");
+    const response = await submit({
+      ...minimal,
+      tokens: [fred, sec, fred],
+      callRatings: [{ token: sec, rating: "bad" }],
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.rejectedTokens).toBeUndefined();
+    expect(mocks.getRecentAlexandriaCalls).not.toHaveBeenCalled();
+    expect(callRows()).toEqual([
+      callRow(0, "req-2", "fred", "token"),
+      callRow(1, "req-3", "sec", "token", "bad"),
+    ]);
+    expect(
+      callRows().every(row => row.feedback_id === response.body.feedbackId),
+    ).toBe(true);
+  });
+
+  it("accepts a token-attributed rating after the window has closed", async () => {
+    mocks.hasRecentAlexandriaActivity.mockResolvedValue(false);
+    const response = await submit({
+      ...minimal,
+      callRatings: [{ token: token("req-1", "census"), rating: "good" }],
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.hasRecentAlexandriaActivity).not.toHaveBeenCalled();
+    expect(mocks.refundAlexandriaFeedback).toHaveBeenCalledOnce();
+    expect(callRows()).toEqual([
+      callRow(0, "req-1", "census", "token", "good"),
+    ]);
+  });
+
+  it("rejects tokens that are forged, expired, from another team or unsigned", async () => {
+    const valid = token("req-2", "fred");
+    const [version, payload, signature] = valid.split(".");
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString());
+    const forged = [
+      version,
+      Buffer.from(
+        JSON.stringify([claims[0], "bls", ...claims.slice(2)]),
+      ).toString("base64url"),
+      signature,
+    ].join(".");
+    const response = await submit({
+      ...minimal,
+      tokens: [
+        valid,
+        forged,
+        token("req-2", "bls", { at: now - 25 * 3600_000 }),
+        token("req-2", "bls", { team: "01933161-0000-7000-8000-00000000000f" }),
+        "v1.not-a-token",
+      ],
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.rejectedTokens).toBe(4);
+    expect(callRows()).toEqual([callRow(0, "req-2", "fred", "token")]);
+  });
+
+  it("falls back to the window when no token verifies, and closes when the window has", async () => {
+    const stale = token("req-2", "fred", { at: now - 25 * 3600_000 });
+    mocks.hasRecentAlexandriaActivity.mockResolvedValue(false);
+    const closed = await submit({ ...minimal, tokens: [stale] });
+    expect(closed.status).toBe(409);
+    expect(closed.body.feedbackErrorCode).toBe("FEEDBACK_WINDOW_EXPIRED");
+    mocks.hasRecentAlexandriaActivity.mockResolvedValue(true);
+    const open = await submit({ ...minimal, tokens: [stale] });
+    expect(open.status).toBe(200);
+    expect(open.body.rejectedTokens).toBe(1);
+    expect(callRows()[0]).toEqual(callRow(0, "req-3", "sec", "window"));
+  });
+
+  it("does not verify tokens without a signing key", async () => {
+    const valid = token("req-2", "fred");
+    config.EXCHANGE_INTERNAL_SECRET = undefined as never;
+    const response = await submit({ ...minimal, tokens: [valid] });
+    expect(response.status).toBe(200);
+    expect(response.body.rejectedTokens).toBe(1);
+    expect(callRows().every(row => row.attribution === "window")).toBe(true);
+  });
+
+  it("falls back to the distinct calls inside the window", async () => {
+    expect((await submit(minimal)).status).toBe(200);
+    expect(callRows()).toEqual([
+      callRow(0, "req-3", "sec", "window"),
+      callRow(1, "req-2", "fred", "window"),
+      callRow(2, "req-2", "bls", "window"),
+    ]);
+  });
+
+  it("records feedback without calls when none are remembered", async () => {
+    mocks.getRecentAlexandriaCalls.mockResolvedValue([]);
+    expect((await submit(minimal)).status).toBe(200);
+    expect(callRows()).toEqual([]);
+    expect(parentRows()).toHaveLength(1);
+  });
+
+  it.each([
+    { tokens: [""] },
+    { tokens: ["x".repeat(1025)] },
+    { tokens: Array.from({ length: 21 }, (_, i) => `t${i}`) },
+    { callRatings: [{ token: "t", rating: "great" }] },
+    { callRatings: [{ token: "t" }] },
+    {
+      callRatings: Array.from({ length: 21 }, (_, i) => ({
+        token: `t${i}`,
+        rating: "good",
+      })),
+    },
+    { requestId: "req-2" },
+  ])("rejects invalid token fields %j", async extra => {
+    expect((await submit({ ...minimal, ...extra })).status).toBe(400);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("keeps tokens out of the 8 KiB payload bound", async () => {
+    const tokens = Array.from({ length: 20 }, (_, i) =>
+      token(`${i}`.padStart(64, "a"), "x".repeat(200)),
+    );
+    expect(JSON.stringify(tokens).length).toBeGreaterThan(8 * 1024);
+    expect((await submit({ ...minimal, tokens })).status).toBe(200);
+  });
+
+  it("forwards the rating and its token calls to the Exchange after the refund", async () => {
+    const fred = token("req-2", "fred");
+    const response = await submit({
+      ...minimal,
+      rating: "bad",
+      origin: "mcp",
+      tokens: [fred],
+      callRatings: [{ token: token("req-3", "sec"), rating: "good" }],
+    });
+    expect(mocks.forwardExchangeToolFeedback).toHaveBeenCalledExactlyOnceWith({
+      teamId,
+      feedbackId: response.body.feedbackId,
+      occurredAt: new Date(now).toISOString(),
+      rating: "bad",
+      origin: "mcp",
+      attribution: "token",
+      calls: [
+        {
+          requestId: "req-2",
+          provider: "fred",
+          capability: "lookup",
+          rating: null,
+        },
+        {
+          requestId: "req-3",
+          provider: "sec",
+          capability: "lookup",
+          rating: "good",
+        },
+      ],
+    });
+    expect(
+      mocks.refundAlexandriaFeedback.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mocks.forwardExchangeToolFeedback.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("forwards window ratings even when no calls are attributed", async () => {
+    mocks.getRecentAlexandriaCalls.mockResolvedValue([]);
+    await submit(minimal);
+    expect(mocks.forwardExchangeToolFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attribution: "window",
+        calls: [],
+        origin: "api",
+      }),
+    );
+  });
+
+  it("does not let a failing forward affect the response", async () => {
+    mocks.forwardExchangeToolFeedback.mockReturnValue(new Promise(() => {}));
+    const response = await submit(minimal);
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+  });
+});

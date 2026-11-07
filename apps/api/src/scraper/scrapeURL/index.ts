@@ -60,11 +60,16 @@ import {
   ScrapeRetryLimitError,
   BrandingNotSupportedError,
   XTwitterConfigurationError,
+  UsOnlyUnavailableError,
+  ExchangeRefusedError,
 } from "./error";
 import { ScrapeRetryTracker } from "./retryTracker";
+import {
+  inWaterfallExperimentArm,
+  waterfallExperimentFor,
+} from "./waterfallExperiments";
 import { executeTransformers } from "./transformers";
 import { LLMRefusalError } from "./transformers/llmExtract";
-import { urlSpecificParams } from "./lib/urlSpecificParams";
 import { shouldCheckRobots } from "./shouldCheckRobots";
 import { loadMock, MockState } from "./lib/mock";
 import { CostTracking } from "../../lib/cost-tracking";
@@ -107,7 +112,10 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import type { ExchangeScrapeMetadata } from "../../lib/exchange";
+import {
+  type ExchangeScrapeMetadata,
+  ThirdPartyDataTermsRequiredError,
+} from "../../lib/exchange";
 import {
   checkUrl,
   type ThreatCheckDedup,
@@ -123,6 +131,8 @@ import {
   SAFE_MODE_LOGIN_ACTIONS,
 } from "../../lib/safe-mode";
 import { resolveThreatProtection } from "../../lib/threat-protection/request";
+import { isUsOnly, usOnlyLocationRefusal } from "../../lib/us-only";
+import { loadFirstScreen } from "../../lib/branding/jev";
 import { UnsafeDomainBlockedError } from "../../lib/threat-protection/error";
 import { canonicalizeUrl } from "../../lib/threat-protection/providers/web-risk/canonicalize";
 
@@ -159,6 +169,12 @@ export type BrowserCookie = {
 };
 
 export type Meta = {
+  /** URL of the page's first screen captured for Jev's branding call (see
+   * the branding format's __experimental_screenshot and
+   * BRANDING_JEV_SCREENSHOT_PERCENT). Internal: never part of the document. */
+  brandingScreenshot?: string;
+  /** That screen's download, started as soon as the engine returns. */
+  brandingScreenshotImage?: ReturnType<typeof loadFirstScreen>;
   id: string;
   url: string;
   rewrittenUrl?: string;
@@ -168,6 +184,9 @@ export type Meta = {
   abort: AbortManager;
   featureFlags: Set<FeatureFlag>;
   mock: MockState | null;
+  /** The Exchange provider whose access was checked when the exchange engine
+   * was chosen, so the engine asks the Exchange for that same provider. */
+  exchangeProviderId?: string;
   /** Whether this scrape may OCR raster images: the request's parsers
    * include `image` (the default; a parse upload of an image always counts)
    * and the deployment has image OCR switched on with FirePDF configured.
@@ -261,6 +280,11 @@ export type Meta = {
     | undefined; // undefined: no prefetch yet, null: prefetch came back empty
   costTracking: CostTracking;
   winnerEngine?: Engine;
+  /** The `raw-` content-cache key of the PDF this scrape looked up through
+   * the fire-pdf cache service, stored with the URL index entry so a later
+   * index hit can ask whether fire-pdf holds a newer parse. A holder shared
+   * by reference, because engines run on a copy of meta. */
+  firePdfCacheKey?: { current?: string };
   abortHandle?: NodeJS.Timeout;
   audioCookies?: BrowserCookie[];
   /** Threat protection decisions made during this scrape, in order (mutable, like logs). */
@@ -422,16 +446,6 @@ async function buildMetaObject(
   internalOptions: InternalOptions,
   costTracking: CostTracking,
 ): Promise<Meta> {
-  const specParams =
-    urlSpecificParams[new URL(url).hostname.replace(/^www\./, "")];
-  if (specParams !== undefined) {
-    options = Object.assign(options, specParams.scrapeOptions);
-    internalOptions = Object.assign(
-      internalOptions,
-      specParams.internalOptions,
-    );
-  }
-
   if (internalOptions.forceEngine === undefined) {
     const forcedEngine = getEngineForUrl(url);
     if (forcedEngine !== undefined) {
@@ -586,6 +600,7 @@ async function buildMetaObject(
     imageOcrEnabled,
     costTracking,
     threatDecisions: [],
+    firePdfCacheKey: {},
     largePdfProcessing: {},
   };
 }
@@ -593,6 +608,7 @@ async function buildMetaObject(
 export type InternalOptions = {
   teamId: string;
   crawlId?: string;
+  origin?: string;
 
   priority?: number; // Passed along to fire-engine
   forceEngine?: Engine | Engine[];
@@ -609,7 +625,9 @@ export type InternalOptions = {
   saveScrapeResultToGCS?: boolean; // Passed along to fire-engine
   bypassBilling?: boolean;
   zeroDataRetention?: boolean;
-  teamFlags?: TeamFlags;
+  /** null: the team has no flags. Absent: not snapshotted, so a check that
+   * must fail closed treats the org as unresolved. */
+  teamFlags?: TeamFlags | null;
   /** Team's org, snapshotted from the request ACUC at acceptance (same
    * pattern as teamFlags). Rides the job payload so org-scoped blocklist
    * checks work without re-fetching the chunk. Required so a payload
@@ -639,6 +657,11 @@ export type InternalOptions = {
   v1JSONAgent?: Exclude<ScrapeOptionsV1["jsonOptions"], undefined>["agent"];
   v1JSONSystemPrompt?: string;
   v1OriginalFormat?: "extract" | "json"; // Track original v1 format for backward compatibility
+
+  /** Attributes the JSON extraction's LLM calls to the feature that asked for
+   * the scrape (e.g. a search monitor's judge): replaces the functionId root
+   * and adds span metadata. */
+  llmTelemetry?: { functionId: string; metadata: Record<string, string> };
 
   isPreCrawl?: boolean; // Whether this scrape is part of a precrawl job
   agentIndexOnly?: boolean; // Pre-confirmation agent key: serve from index only, never touch web/Fire Engine
@@ -969,6 +992,31 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
           break;
         } catch (error) {
           if (error instanceof WrappedEngineError) {
+            const nextEngine = remainingEngines[0]?.engine;
+            const experiment = waterfallExperimentFor(
+              error.engine,
+              error.error,
+              nextEngine,
+            );
+            if (experiment) {
+              const testArm = inWaterfallExperimentArm(meta.id, experiment);
+              meta.logger.info("Waterfall experiment decision", {
+                experiment,
+                arm: testArm ? "test" : "control",
+                engine: error.engine,
+                nextEngine,
+                error: error.error,
+              });
+              if (testArm) {
+                enginePromises = enginePromises.filter(
+                  x => x.engine !== error.engine,
+                );
+                if (enginePromises.length === 0) {
+                  break;
+                }
+                continue;
+              }
+            }
             if (error.engine === "x-twitter") {
               meta.logger.warn("X/Twitter scrape failed fatally.", {
                 error: error.error,
@@ -1017,7 +1065,10 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
               error.error instanceof ProxySelectionError ||
               error.error instanceof NoCachedDataError ||
               error.error instanceof AgentIndexOnlyError ||
-              error.error instanceof XTwitterConfigurationError
+              error.error instanceof XTwitterConfigurationError ||
+              error.error instanceof UsOnlyUnavailableError ||
+              error.error instanceof ExchangeRefusedError ||
+              error.error instanceof ThirdPartyDataTermsRequiredError
             ) {
               throw error.error;
             } else if (error.error instanceof LLMRefusalError) {
@@ -1162,11 +1213,11 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
 
     let document: Document = {
       markdown: engineResult.markdown,
+      warning: engineResult.warning,
       pages: engineResult.pages,
       blocks: engineResult.blocks,
       rawHtml: engineResult.html,
       rawBase64: engineResult.rawBase64,
-      json: engineResult.json,
       screenshot: engineResult.screenshot,
       actions: engineResult.actions,
       branding: engineResult.branding,
@@ -1198,6 +1249,7 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
               }
           : {}),
         postprocessorsUsed: engineResult.postprocessorsUsed,
+        provider: engineResult.exchange?.provider,
       },
     };
 
@@ -1213,6 +1265,12 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
           : warning;
     }
 
+    meta.brandingScreenshot = engineResult.brandingScreenshot;
+    // Download it while the transformers before branding run. It never
+    // rejects: an unreadable screen leaves Jev answering from page data.
+    meta.brandingScreenshotImage = engineResult.brandingScreenshot
+      ? loadFirstScreen(engineResult.brandingScreenshot, meta.logger)
+      : undefined;
     document = await executeTransformers(meta, document);
 
     // Set final span attributes
@@ -1302,6 +1360,23 @@ export async function scrapeURL(
           }
           internalOptions.threatProtection = tp.policy ?? undefined;
         }
+      }
+
+      // ZDR always verifies TLS, for every engine, even when the request asks
+      // to skip verification.
+      if (internalOptions.zeroDataRetention) {
+        options.skipTlsVerification = false;
+      }
+
+      const usOnlyLocationError = usOnlyLocationRefusal(
+        internalOptions.teamFlags ?? undefined,
+        options.location?.country,
+      );
+      if (usOnlyLocationError) {
+        return {
+          success: false,
+          error: new UsOnlyUnavailableError(usOnlyLocationError),
+        };
       }
 
       const meta = await buildMetaObject(
@@ -1404,7 +1479,9 @@ export async function scrapeURL(
                       url: urlToCheck,
                       zeroDataRetention:
                         internalOptions.zeroDataRetention || false,
+                      usOnly: isUsOnly(internalOptions.teamFlags ?? undefined),
                       location: options.location,
+                      skipTlsVerification: options.skipTlsVerification,
                     },
                     id,
                     meta.logger,
@@ -1430,7 +1507,9 @@ export async function scrapeURL(
                   setSpanAttributes(span, {
                     "scrape.blocked_by_robots": true,
                   });
-                  throw new CrawlDenialError("URL blocked by robots.txt");
+                  throw new CrawlDenialError("URL blocked by robots.txt", {
+                    robotsBlockedUrl: urlToCheck,
+                  });
                 }
               } catch (error) {
                 if (error instanceof CrawlDenialError) {
@@ -1480,6 +1559,7 @@ export async function scrapeURL(
 
       try {
         let result: ScrapeUrlResponse;
+        let brandingSkippedReason: string | undefined;
         while (true) {
           try {
             result = await scrapeURLLoop(meta);
@@ -1628,10 +1708,39 @@ export async function scrapeURL(
                   [...meta.featureFlags].filter(x => x !== "document"),
                 );
               }
+            } else if (
+              error instanceof BrandingNotSupportedError &&
+              meta.options.formats.some(f => f.type !== "branding")
+            ) {
+              // The page turned out to be a PDF, document or image. Keep the
+              // other requested formats instead of failing the whole scrape;
+              // branding is dropped with a warning. Branding-only requests
+              // still fail with the error.
+              retryTracker.record("feature_removal", error);
+              meta.logger.info("Skipping branding for a non-HTML page", {
+                reason: error.message,
+              });
+              brandingSkippedReason = error.message;
+              meta.featureFlags = new Set(
+                [...meta.featureFlags].filter(x => x !== "branding"),
+              );
+              meta.options = {
+                ...meta.options,
+                formats: meta.options.formats.filter(
+                  f => f.type !== "branding",
+                ),
+              };
             } else {
               throw error;
             }
           }
+        }
+
+        if (brandingSkippedReason && result.success) {
+          const warning = `Branding was skipped: ${brandingSkippedReason}`;
+          result.document.warning = result.document.warning
+            ? `${result.document.warning} ${warning}`
+            : warning;
         }
 
         // Threat protection: if the scrape ended up on a different URL than
@@ -1817,6 +1926,13 @@ export async function scrapeURL(
           });
         } else if (error instanceof SSLError) {
           errorType = "SSLError";
+          // Engines don't know about ZDR; swap in the message that doesn't
+          // suggest skipTlsVerification, which ZDR overrides above.
+          if (meta.internalOptions.zeroDataRetention) {
+            const zdrError = new SSLError(false, true);
+            zdrError.stack = error.stack;
+            error = zdrError;
+          }
           meta.logger.warn("scrapeURL: SSL error", { error });
         } else if (error instanceof ActionError) {
           errorType = "ActionError";

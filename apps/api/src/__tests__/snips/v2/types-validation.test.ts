@@ -46,7 +46,7 @@ describe("V2 Types Validation", () => {
       expect(result.url).toBe("https://example.com");
       expect(result.origin).toBe("api");
       expect(result.formats).toEqual([{ type: "markdown" }]);
-      expect(result.skipTlsVerification).toBe(true);
+      expect(result.skipTlsVerification).toBe(false);
     });
 
     it("should preserve explicit skipTlsVerification false", () => {
@@ -125,6 +125,22 @@ describe("V2 Types Validation", () => {
       ]);
     });
 
+    it("should accept the experimental first-screen flag on branding only as a boolean", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [{ type: "branding", __experimental_screenshot: true }],
+      };
+      expect(scrapeRequestSchema.parse(input).formats).toEqual([
+        { type: "branding", __experimental_screenshot: true },
+      ]);
+      expect(() =>
+        scrapeRequestSchema.parse({
+          url: "https://example.com",
+          formats: [{ type: "branding", __experimental_screenshot: "yes" }],
+        }),
+      ).toThrow();
+    });
+
     it("should accept valid scrape request with json format options", () => {
       const input: ScrapeRequestInput = {
         url: "https://example.com",
@@ -147,6 +163,72 @@ describe("V2 Types Validation", () => {
       expect(result.formats).toHaveLength(1);
       expect(result.formats[0].type).toBe("json");
       expect(result.timeout).toBe(60000); // Should be transformed from 30000
+    });
+
+    it("should reject JSON schemas structured outputs cannot express", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [
+          {
+            type: "json",
+            schema: {
+              type: "object",
+              properties: { events: { type: "array" } },
+            },
+          },
+        ],
+      };
+
+      const result = scrapeRequestSchema.safeParse(input);
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map(issue => issue.message)).toContain(
+        'Invalid JSON schema at "properties.events": arrays must define "items".',
+      );
+    });
+
+    it("should accept JSON schemas with capitalized types and oneOf", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [
+          {
+            type: "json",
+            schema: {
+              type: "object",
+              properties: {
+                name: { type: "String" },
+                slot: { oneOf: [{ type: "string" }, { type: "number" }] },
+              },
+            },
+          },
+        ],
+      };
+
+      expect(() => scrapeRequestSchema.parse(input)).not.toThrow();
+    });
+
+    it("should reject unsupported changeTracking schemas", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        formats: [
+          "markdown",
+          {
+            type: "changeTracking",
+            modes: ["json"],
+            schema: {
+              type: "object",
+              properties: {
+                price: { type: "object", properties: {}, allOf: [] },
+              },
+            },
+          },
+        ],
+      };
+
+      const result = scrapeRequestSchema.safeParse(input);
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map(issue => issue.message)).toContain(
+        'Invalid JSON schema at "properties.price": "allOf" is not supported for JSON extraction.',
+      );
     });
 
     it("should accept query format without markdown", () => {
@@ -245,7 +327,7 @@ describe("V2 Types Validation", () => {
             schema: {
               type: "object",
               properties: {
-                changes: { type: "array" },
+                changes: { type: "array", items: { type: "string" } },
               },
             },
             modes: ["json"],
@@ -409,6 +491,16 @@ describe("V2 Types Validation", () => {
 
       const result = scrapeRequestSchema.parse(input);
       expect(result.integration).toBe("dify");
+    });
+
+    it("should accept the lovable integration value", () => {
+      const input: ScrapeRequestInput = {
+        url: "https://example.com",
+        integration: "lovable",
+      };
+
+      const result = scrapeRequestSchema.parse(input);
+      expect(result.integration).toBe("lovable");
     });
 
     it("should accept integration value starting with underscore", () => {
@@ -691,8 +783,8 @@ describe("V2 Types Validation", () => {
         expect(result.maxAge).toBeUndefined();
       });
 
-      // lockdown takes precedence silently at the engine layer; other options are ignored, not rejected
-      it("should accept lockdown: true alongside any other options", () => {
+      // Profiles require browser state, which a cache-only request cannot supply.
+      it("should reject profile state with lockdown", () => {
         const input: ScrapeRequestInput = {
           url: "https://example.com",
           lockdown: true,
@@ -703,8 +795,9 @@ describe("V2 Types Validation", () => {
           formats: [{ type: "markdown" }, { type: "changeTracking" }],
         };
 
-        const result = scrapeRequestSchema.parse(input);
-        expect(result.lockdown).toBe(true);
+        expect(() => scrapeRequestSchema.parse(input)).toThrow(
+          "Profiles require live browsing and cannot be used with lockdown.",
+        );
       });
     });
   });
@@ -758,6 +851,21 @@ describe("V2 Types Validation", () => {
       expect(result.prompt).toBe("Extract the title");
     });
 
+    it("should accept an extract schema that uses standard string formats", () => {
+      const input: ExtractRequestInput = {
+        urls: ["https://example.com"],
+        schema: {
+          type: "object",
+          properties: {
+            contact: { type: "string", format: "email" },
+          },
+        },
+      };
+
+      const result = extractRequestSchema.parse(input);
+      expect(result.schema).toBeDefined();
+    });
+
     it("should reject extract request without urls or prompt", () => {
       const input = {
         schema: {
@@ -802,6 +910,21 @@ describe("V2 Types Validation", () => {
 
       const result = extractRequestSchema.parse(input);
       expect(result.urls).toHaveLength(10);
+    });
+
+    it("should reject JSON schemas structured outputs cannot express", () => {
+      const result = extractRequestSchema.safeParse({
+        urls: ["https://example.com"],
+        schema: {
+          type: "object",
+          properties: { events: { type: "array" } },
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map(issue => issue.message)).toContain(
+        'Invalid JSON schema at "properties.events": arrays must define "items".',
+      );
     });
 
     it("should reject invalid JSON schema", () => {
@@ -1389,13 +1512,13 @@ describe("V2 Types Validation", () => {
     it("should accept search request with simple categories array", () => {
       const input: SearchRequestInput = {
         query: "test",
-        categories: ["github", "research"],
+        categories: ["pdf", "research"],
       };
 
       const result = searchRequestSchema.parse(input);
       // Categories are transformed from string array to object array
       expect(result.categories).toEqual([
-        { type: "github" },
+        { type: "pdf" },
         { type: "research" },
       ]);
     });
@@ -1417,6 +1540,34 @@ describe("V2 Types Validation", () => {
         searchRequestSchema.parse({
           query: "test",
           categories: [{ type: "developer", repos: ["firecrawl/firecrawl"] }],
+        }),
+      ).toThrow();
+    });
+
+    it("should accept the gov category on its own and reject params or mixing", () => {
+      expect(
+        searchRequestSchema.parse({ query: "test", categories: ["gov"] })
+          .categories,
+      ).toEqual([{ type: "gov" }]);
+
+      expect(
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "gov" }],
+        }).categories,
+      ).toEqual([{ type: "gov" }]);
+
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          categories: [{ type: "gov", sites: ["ecfr.gov"] }],
+        }),
+      ).toThrow();
+
+      expect(() =>
+        searchRequestSchema.parse({
+          query: "test",
+          categories: ["gov", "pdf"],
         }),
       ).toThrow();
     });
@@ -1474,7 +1625,7 @@ describe("V2 Types Validation", () => {
       expect(() =>
         searchRequestSchema.parse({
           query: "test",
-          categories: ["docs", "github", "developer_index"],
+          categories: ["docs", "pdf", "developer_index"],
         }),
       ).toThrow(/cannot be combined/);
     });
@@ -1503,9 +1654,6 @@ describe("V2 Types Validation", () => {
       const input: SearchRequestInput = {
         query: "test",
         categories: [
-          {
-            type: "github",
-          },
           {
             type: "research",
           },
@@ -1983,7 +2131,7 @@ describe("V2 Types Validation", () => {
             schema: {
               type: "object",
               properties: {
-                changes: { type: "array" },
+                changes: { type: "array", items: { type: "string" } },
               },
             },
           },

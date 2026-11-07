@@ -1,9 +1,8 @@
 import { vi } from "vitest";
 
 // vi.mock is hoisted above the file's static imports, so any value a factory
-// reads at build time must be created in vi.hoisted(). (Jest left jest.mock
-// un-hoisted here because `jest` was imported from @jest/globals.) The `redis`
-// stub below stays module-level: its factory only captures it lazily.
+// reads at build time must be created in vi.hoisted(). The `redis` stub below
+// stays module-level: its factory only captures it lazily.
 const {
   logger,
   withAuth,
@@ -40,6 +39,7 @@ vi.mock("../../autumn/autumn.service", () => ({
   autumnService: {
     trackCredits,
     refundCredits,
+    hostedMcpFeatureId: async () => "MCP_CREDITS",
   },
   featureIdForBillingEndpoint: (endpoint?: string) =>
     endpoint === "search" ? "SEARCH_CREDITS" : "CREDITS",
@@ -119,7 +119,10 @@ vi.mock("../../queue-service", () => ({
   getRedisConnection: () => redis,
 }));
 
-import { processBillingBatch } from "../batch_billing";
+import {
+  processBillingBatch,
+  startBillingBatchProcessing,
+} from "../batch_billing";
 
 function makeOp(overrides: Record<string, unknown> = {}) {
   // `org_id: undefined` in an override drops the key entirely, which is the
@@ -395,6 +398,69 @@ describe("processBillingBatch", () => {
     );
     // The op still billed and is not requeued: only the legacy branch defers.
     expect(billTeam7).toHaveBeenCalled();
+    expect(queue).toHaveLength(0);
+  });
+});
+
+describe("hosted MCP charges", () => {
+  const hosted = (overrides: Record<string, unknown> = {}) =>
+    makeOp({
+      credits: 5,
+      billing: { endpoint: "scrape", hostedMcp: true },
+      autumnTrackInRequest: true,
+      ...overrides,
+    });
+
+  it("writes a hosted charge as one ordinary ledger row", async () => {
+    queue = [hosted()];
+
+    await processBillingBatch();
+
+    expect(billTeam7).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ credits: 5, subscription_id: null }),
+    );
+  });
+
+  it("refunds a hosted charge and a regular one each to the feature it was charged on", async () => {
+    queue = [hosted(), makeOp({ autumnTrackInRequest: true })];
+    billTeam7.mockRejectedValue(new Error("db failed"));
+
+    await processBillingBatch();
+
+    expect(refundCredits).toHaveBeenCalledTimes(2);
+    expect(refundCredits).toHaveBeenCalledWith(
+      expect.objectContaining({ value: 5, featureId: "MCP_CREDITS" }),
+    );
+    expect(refundCredits).toHaveBeenCalledWith(
+      expect.objectContaining({ value: 10, featureId: "CREDITS" }),
+    );
+  });
+});
+
+describe("startBillingBatchProcessing", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("logs a Redis error on a tick and keeps processing on the next one", async () => {
+    vi.useFakeTimers();
+    const loadingError = new Error(
+      "LOADING Redis is loading the dataset in memory",
+    );
+    redis.llen.mockRejectedValueOnce(loadingError);
+
+    startBillingBatchProcessing();
+
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(logger.error).toHaveBeenCalledWith(
+      "Error in periodic billing batch processing",
+      { error: loadingError },
+    );
+    expect(redis.set).not.toHaveBeenCalled();
+
+    queue = [makeOp()];
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(billTeam7).toHaveBeenCalledTimes(1);
     expect(queue).toHaveLength(0);
   });
 });

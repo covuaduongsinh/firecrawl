@@ -3,11 +3,18 @@ import { DrizzleQueryError } from "drizzle-orm/errors";
 import { config } from "../../../config";
 import { db } from "../../../db/connection";
 import * as schema from "../../../db/schema";
+import {
+  getRecentAlexandriaCalls,
+  hasRecentAlexandriaActivity,
+} from "../../../lib/alexandria-activity";
+import { verifyFeedbackToken } from "../../../lib/alexandria-feedback-token";
+import { forwardExchangeToolFeedback } from "../../../lib/exchange";
 import { logger } from "../../../lib/logger";
 import { getScrapeZDR, getSearchZDR } from "../../../lib/zdr-helpers";
 import type { RequestWithAuth, EndpointFeedbackErrorCode } from "../types";
 import type { FeedbackRecordResult } from "./internal-types";
 import type { AlexandriaFeedbackRequest } from "./alexandria-schema";
+import { refundAlexandriaFeedback } from "./alexandria-refund";
 
 const failure = (
   status: number,
@@ -17,6 +24,13 @@ const failure = (
   status,
   body: { success: false, feedbackErrorCode, error },
 });
+
+type FeedbackCall = {
+  requestId: string;
+  provider: string;
+  capability: string;
+  rating: AlexandriaFeedbackRequest["rating"] | null;
+};
 
 export async function recordAlexandriaFeedback(
   req: RequestWithAuth<any, any, any>,
@@ -59,11 +73,75 @@ export async function recordAlexandriaFeedback(
         success: true,
         feedbackId: "00000000-0000-0000-0000-000000000000",
         creditsRefunded: 0,
+        creditsRefundedToday: 0,
+        dailyRefundCap: config.ALEXANDRIA_FEEDBACK_DAILY_CAP_CREDITS,
       },
     };
   }
 
+  const now = Date.now();
+  const callRatings = new Map(
+    (body.callRatings ?? []).map(entry => [entry.token, entry.rating]),
+  );
+  const submittedTokens = [
+    ...new Set([...(body.tokens ?? []), ...callRatings.keys()]),
+  ];
+  const calls = new Map<string, FeedbackCall>();
+  let rejectedTokens = 0;
+  for (const token of submittedTokens) {
+    const claims = verifyFeedbackToken(token, teamId, now);
+    if (!claims) {
+      rejectedTokens++;
+      continue;
+    }
+    const key = JSON.stringify([
+      claims.requestId,
+      claims.provider,
+      claims.capability,
+    ]);
+    const rating = callRatings.get(token) ?? calls.get(key)?.rating ?? null;
+    calls.set(key, {
+      requestId: claims.requestId,
+      provider: claims.provider,
+      capability: claims.capability,
+      rating,
+    });
+  }
+  const attribution = calls.size > 0 ? "token" : "window";
+
+  if (attribution === "window") {
+    let withinWindow: boolean;
+    try {
+      withinWindow = await hasRecentAlexandriaActivity(teamId);
+    } catch (error) {
+      logger.error("Failed to check the Alexandria feedback window", {
+        error,
+        teamId,
+      });
+      return failure(500, "INTERNAL", "Failed to check the feedback window.");
+    }
+    if (!withinWindow) {
+      return failure(
+        409,
+        "FEEDBACK_WINDOW_EXPIRED",
+        `Alexandria feedback must be submitted within ${config.ALEXANDRIA_FEEDBACK_WINDOW_SEC} seconds of an Alexandria search, discovery, or execution, or name its calls with valid feedback tokens.`,
+      );
+    }
+    const windowStart = now - config.ALEXANDRIA_FEEDBACK_WINDOW_SEC * 1000;
+    for (const call of await getRecentAlexandriaCalls(teamId)) {
+      if (call.at < windowStart) continue;
+      const { requestId, provider, capability } = call;
+      calls.set(JSON.stringify([requestId, provider, capability]), {
+        requestId,
+        provider,
+        capability,
+        rating: null,
+      });
+    }
+  }
+
   const feedbackId = uuidv7();
+  const occurredAt = new Date(now).toISOString();
   const providerRows = (body.providerFeedback ?? []).map((entry, position) => ({
     feedback_id: feedbackId,
     team_id: teamId,
@@ -95,6 +173,7 @@ export async function recordAlexandriaFeedback(
         requested_url: body.requestedWebsite.url,
         requested_functionality: body.requestedWebsite.requestedFunctionality,
         rationale: body.rationale,
+        objective: body.objective ?? null,
         origin: body.origin,
         integration: body.integration ?? null,
         schema_version: 2,
@@ -108,6 +187,20 @@ export async function recordAlexandriaFeedback(
         await tx
           .insert(schema.alexandria_feedback_capabilities)
           .values(capabilityRows);
+      }
+      if (calls.size > 0) {
+        await tx.insert(schema.alexandria_feedback_calls).values(
+          [...calls.values()].map((call, position) => ({
+            feedback_id: feedbackId,
+            team_id: teamId,
+            position,
+            request_id: call.requestId,
+            provider: call.provider,
+            capability: call.capability,
+            rating: call.rating,
+            attribution,
+          })),
+        );
       }
     });
   } catch (error) {
@@ -125,8 +218,29 @@ export async function recordAlexandriaFeedback(
     });
     return failure(500, "INTERNAL", "Failed to record feedback.");
   }
+  const refund = await refundAlexandriaFeedback({
+    feedbackId,
+    teamId,
+    orgId: req.acuc?.org_id ?? null,
+    rating: body.rating,
+    requestedUrl: body.requestedWebsite.url,
+  });
+  void forwardExchangeToolFeedback({
+    teamId,
+    feedbackId,
+    occurredAt,
+    rating: body.rating,
+    origin: body.origin,
+    attribution,
+    calls: [...calls.values()],
+  });
   return {
     status: 200,
-    body: { success: true, feedbackId, creditsRefunded: 0 },
+    body: {
+      success: true,
+      feedbackId,
+      ...refund,
+      ...(rejectedTokens > 0 ? { rejectedTokens } : {}),
+    },
   };
 }

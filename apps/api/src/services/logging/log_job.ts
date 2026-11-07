@@ -1,5 +1,3 @@
-import { db } from "../../db/connection";
-import * as schema from "../../db/schema";
 import { changeTrackingInsertScrape } from "../../lib/change-tracking-store";
 import { config } from "../../config";
 import { enqueueZdrCleanupJob } from "../../lib/zdr-queue";
@@ -7,7 +5,6 @@ import "dotenv/config";
 import { logger as _logger } from "../../lib/logger";
 import { EXTERNAL_REQUEST_ID_MAX_BYTES } from "../../lib/external-request-id";
 import { configDotenv } from "dotenv";
-import type { PgTable } from "drizzle-orm/pg-core";
 import {
   saveDeepResearchToGCS,
   saveExtractToGCS,
@@ -19,14 +16,21 @@ import {
 import { hasFormatOfType } from "../../lib/format-utils";
 import { keylessTeamUuid } from "../../lib/keyless";
 import type { Document, ScrapeOptions } from "../../controllers/v2/types";
+import type {
+  SearchResultCountsBySource,
+  SearchResultCategoriesBySource,
+} from "../../lib/entities";
 import type { CostTracking } from "../../lib/cost-tracking";
+import type { ErrorCodes } from "../../lib/error";
 import type { Logger } from "winston";
 import { saveExtractResult } from "../../lib/extract/extract-redis";
 import { trackFirstSurfaceUse } from "../posthog";
 import { PubSub, type PublishOptions, type Topic } from "@google-cloud/pubsub";
 import { pubsubLogPublishTotal } from "../../lib/pubsub-log-metrics";
 import { sanitizeLogData, sanitizeText } from "./sanitize";
+import { redactLogData } from "./redact";
 import {
+  JOB_ACCESS_TTL_MS,
   isApiJobKind,
   normalizeJobAccessTeamId,
   writeApiJobAccess,
@@ -38,6 +42,7 @@ import {
   writeScrapeJobState,
 } from "../../lib/job-state-store";
 import { buildReplayContextFromScrape } from "../../lib/scrape-interact/scrape-replay";
+import { browserOptionsFromScrape } from "../../lib/browser-options";
 import {
   initializeRequestCredits,
   recordRequestCredits,
@@ -45,7 +50,7 @@ import {
 configDotenv();
 
 const previewTeamId = "3adefd26-77ec-5968-8dcf-c94b5630d1de";
-const DEFAULT_JOB_ACCESS_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_JOB_ACCESS_TTL_MS = JOB_ACCESS_TTL_MS;
 
 async function withLogSpan<T>(
   params: {
@@ -53,7 +58,6 @@ async function withLogSpan<T>(
     table: string;
     id: string;
     requestId?: string;
-    force?: boolean;
     zeroDataRetention?: boolean;
   },
   fn: () => Promise<T>,
@@ -65,7 +69,6 @@ async function withLogSpan<T>(
         "log_job.table": params.table,
         "log_job.id": params.id,
         "log_job.request_id": params.requestId,
-        "log_job.force": params.force,
       });
       return fn();
     },
@@ -116,25 +119,6 @@ function sanitizeString(value: string | null | undefined): string | null {
 
   return sanitizeText(value);
 }
-
-const tableMap: Record<string, PgTable> = {
-  requests: schema.requests,
-  scrapes: schema.scrapes,
-  parses: schema.parses,
-  crawls: schema.crawls,
-  batch_scrapes: schema.batch_scrapes,
-  searches: schema.searches,
-  research_paper_searches: schema.research_paper_searches,
-  research_paper_inspects: schema.research_paper_inspects,
-  research_paper_reads: schema.research_paper_reads,
-  research_related_papers: schema.research_related_papers,
-  research_github_searches: schema.research_github_searches,
-  code_searches: schema.code_searches,
-  extracts: schema.extracts,
-  maps: schema.maps,
-  llmstxts: schema.llmstxts,
-  deep_researches: schema.deep_researches,
-};
 
 let pubSubClient: PubSub | null | undefined;
 const pubSubTopics = new Map<string, Topic>();
@@ -396,12 +380,7 @@ async function shutdownPubSubLoggingOnce(): Promise<void> {
   }
 }
 
-async function robustInsert(
-  table: string,
-  data: any,
-  force: boolean,
-  _logger: Logger,
-) {
+async function robustInsert(table: string, data: any, _logger: Logger) {
   const logger = _logger.child({
     module: "log_job",
     method: "robustInsert",
@@ -410,84 +389,22 @@ async function robustInsert(
   });
 
   if (config.USE_DB_AUTHENTICATION !== true) {
-    logger.info(
-      "Skipping database insertion due to USE_DB_AUTHENTICATION being off",
-    );
+    logger.info("Skipping job log due to USE_DB_AUTHENTICATION being off");
     return;
   }
 
-  // The single point where a row leaves for both stores: clean it once so
-  // PostgreSQL and ClickHouse receive identical, accepted values.
-  data = sanitizeLogData({
-    ...data,
-    created_at: data.created_at ?? new Date(),
-  });
+  // Redact credentials and internal fields, then clean the row once so the
+  // log receives accepted values.
+  data = sanitizeLogData(
+    redactLogData({
+      ...data,
+      created_at: data.created_at ?? new Date(),
+    }),
+  );
 
-  // Pub/Sub is the store of record: publish first and wait for it. A failed
-  // publish fails the log call, and the PostgreSQL copy is not attempted.
+  // Pub/Sub is the store of record: publish and wait for it. A failed
+  // publish fails the log call.
   await publishLog(table, data, logger);
-
-  // The PostgreSQL copy is on its way out; its failure is logged, not thrown.
-  const attempts: { error: any; timeMs: number; backoffMs: number }[] = [];
-  try {
-    await withSpan("log_job.postgres.insert", async span => {
-      setSpanAttributes(span, {
-        "db.system": "postgresql",
-        "log_job.table": table,
-        "log_job.id": data.id,
-        "log_job.force": force,
-        "log_job.postgres.enabled": true,
-      });
-      const target = tableMap[table];
-
-      const maxAttempts = force ? 10 : 1;
-      for (let i = 0; i < maxAttempts; i++) {
-        const backoffMs = i === 0 ? 0 : 75;
-        const start = Date.now();
-        try {
-          await db.insert(target).values(data);
-          attempts.push({
-            error: null,
-            timeMs: Date.now() - start,
-            backoffMs,
-          });
-          break;
-        } catch (error) {
-          attempts.push({
-            error,
-            timeMs: Date.now() - start,
-            backoffMs,
-          });
-          if (force) {
-            await new Promise(resolve => setTimeout(resolve, 75));
-          }
-        }
-      }
-
-      const lastAttempt = attempts.at(-1);
-      setSpanAttributes(span, {
-        "log_job.postgres.attempts": attempts.length,
-        "log_job.postgres.retries": Math.max(0, attempts.length - 1),
-        "log_job.postgres.outcome":
-          lastAttempt?.error === null ? "inserted" : "failed",
-      });
-      if (lastAttempt?.error !== null) {
-        throw (
-          lastAttempt?.error ?? new Error("Database insert was not attempted")
-        );
-      }
-    });
-
-    if (attempts.length === 1) {
-      logger.debug("Inserted into database successfully", { attempts });
-    } else {
-      logger.warn("Inserted into database successfully with retries", {
-        attempts,
-      });
-    }
-  } catch {
-    logger.error("Failed to insert into database", { attempts });
-  }
 }
 
 type LoggedRequest = {
@@ -510,8 +427,8 @@ type LoggedRequest = {
     | "research_paper_inspect"
     | "research_paper_read"
     | "research_related_papers"
-    | "research_github_search"
-    | "code_search";
+    | "code_search"
+    | "gov_search";
   api_version: string;
   team_id: string;
   origin?: string;
@@ -527,6 +444,8 @@ type LoggedRequest = {
   external_request_id?: string | null;
   jobAccess?: boolean;
   jobAccessExpiresAt?: Date;
+  /** An agent run's ZDR retention, recorded on its job access row. */
+  jobAccessZeroDataRetentionMinutes?: number;
   creditsShards?: number;
 };
 
@@ -615,6 +534,7 @@ async function logRequestInternal(request: LoggedRequest) {
           new Date(Date.now() + DEFAULT_JOB_ACCESS_TTL_MS),
         clientOrigin: sanitizedOrigin,
         zeroDataRetention: request.zeroDataRetention,
+        zeroDataRetentionMinutes: request.jobAccessZeroDataRetentionMinutes,
       });
     } catch (error) {
       logger.error("Failed to write API job access to Bigtable", {
@@ -658,7 +578,6 @@ async function logRequestInternal(request: LoggedRequest) {
         logger,
       ),
     },
-    true,
     logger,
   );
 }
@@ -669,6 +588,8 @@ export type LoggedScrape = {
   url: string;
   is_successful: boolean;
   error?: string;
+  /** Code of a failed scrape's error; the only error detail kept under zero data retention. */
+  error_code?: ErrorCodes;
   doc?: Document;
   time_taken: number;
   team_id: string;
@@ -703,29 +624,20 @@ type LogScrapeHooks = {
   onStateWritten?: (outcome: ScrapeStateOutcome) => void;
 };
 
-export async function logScrape(
-  scrape: LoggedScrape,
-  force: boolean = false,
-  hooks?: LogScrapeHooks,
-) {
+export async function logScrape(scrape: LoggedScrape, hooks?: LogScrapeHooks) {
   return withLogSpan(
     {
       operation: scrape.is_parse ? "parse" : "scrape",
       table: scrape.is_parse ? "parses" : "scrapes",
       id: scrape.id,
       requestId: scrape.request_id,
-      force,
       zeroDataRetention: scrape.zeroDataRetention,
     },
-    () => logScrapeInternal(scrape, force, hooks),
+    () => logScrapeInternal(scrape, hooks),
   );
 }
 
-async function logScrapeInternal(
-  scrape: LoggedScrape,
-  force: boolean = false,
-  hooks?: LogScrapeHooks,
-) {
+async function logScrapeInternal(scrape: LoggedScrape, hooks?: LogScrapeHooks) {
   const logger = _logger.child({
     module: "log_job",
     method: "logScrape",
@@ -757,6 +669,7 @@ async function logScrapeInternal(
             options: scrape.options,
           }).context;
       const written = await writeScrapeJobState(scrape.id, {
+        ...(scrape.zeroDataRetention ? { zeroDataRetention: true } : {}),
         status: scrape.is_successful ? "completed" : "failed",
         requestId: scrape.request_id,
         completedAtMs: Date.now(),
@@ -766,9 +679,7 @@ async function logScrapeInternal(
           : {
               ...(scrape.error ? { error: scrape.error } : {}),
               ...(replay ? { replay } : {}),
-              ...(scrape.options.profile
-                ? { profile: scrape.options.profile }
-                : {}),
+              browser: browserOptionsFromScrape(scrape.options),
               ...(typeof (scrape.options as any).origin === "string"
                 ? { origin: (scrape.options as any).origin }
                 : {}),
@@ -807,7 +718,11 @@ async function logScrapeInternal(
         ? "<redacted due to zero data retention>"
         : scrape.url,
       is_successful: scrape.is_successful,
-      error: scrape.error ?? null,
+      error: scrape.zeroDataRetention
+        ? scrape.is_successful
+          ? null
+          : (scrape.error_code ?? "<redacted due to zero data retention>")
+        : (scrape.error ?? null),
       time_taken: scrape.time_taken,
       team_id: storedTeamId,
       options: scrape.zeroDataRetention ? null : scrape.options,
@@ -826,7 +741,6 @@ async function logScrapeInternal(
             content_type: scrape.content_type ?? null,
           }),
     },
-    force,
     logger,
   );
 
@@ -913,6 +827,7 @@ type LoggedProviderScrape = {
   credits_cost: number;
   is_successful: boolean;
   error?: string;
+  zeroDataRetention: boolean;
 };
 
 export async function logProviderScrape(scrape: LoggedProviderScrape) {
@@ -922,7 +837,7 @@ export async function logProviderScrape(scrape: LoggedProviderScrape) {
       table: "scrapes",
       id: scrape.id,
       requestId: scrape.request_id,
-      zeroDataRetention: false,
+      zeroDataRetention: scrape.zeroDataRetention,
     },
     () => logProviderScrapeInternal(scrape),
   );
@@ -947,12 +862,18 @@ async function logProviderScrapeInternal(scrape: LoggedProviderScrape) {
     {
       id: scrape.id,
       request_id: scrape.request_id,
-      url: scrape.target,
+      url: scrape.zeroDataRetention
+        ? "<redacted due to zero data retention>"
+        : scrape.target,
       is_successful: scrape.is_successful,
-      error: scrape.error ?? null,
+      error: scrape.zeroDataRetention
+        ? scrape.error === undefined
+          ? null
+          : "<redacted due to zero data retention>"
+        : (scrape.error ?? null),
       time_taken: scrape.time_taken,
       team_id: storedTeamId,
-      options: scrape.options,
+      options: scrape.zeroDataRetention ? null : scrape.options,
       cost_tracking: null,
       pdf_num_pages: null,
       credits_cost: scrape.credits_cost,
@@ -960,7 +881,6 @@ async function logProviderScrapeInternal(scrape: LoggedProviderScrape) {
       monitor_check_id: null,
       content_type: null,
     },
-    false,
     logger,
   );
 }
@@ -979,21 +899,20 @@ type LoggedCrawl = {
   monitor_check_id?: string | null;
 };
 
-export async function logCrawl(crawl: LoggedCrawl, force: boolean = false) {
+export async function logCrawl(crawl: LoggedCrawl) {
   return withLogSpan(
     {
       operation: "crawl",
       table: "crawls",
       id: crawl.id,
       requestId: crawl.request_id,
-      force,
       zeroDataRetention: crawl.zeroDataRetention,
     },
-    () => logCrawlInternal(crawl, force),
+    () => logCrawlInternal(crawl),
   );
 }
 
-async function logCrawlInternal(crawl: LoggedCrawl, force: boolean = false) {
+async function logCrawlInternal(crawl: LoggedCrawl) {
   const logger = _logger.child({
     module: "log_job",
     method: "logCrawl",
@@ -1022,7 +941,6 @@ async function logCrawlInternal(crawl: LoggedCrawl, force: boolean = false) {
       monitor_id: crawl.monitor_id ?? null,
       monitor_check_id: crawl.monitor_check_id ?? null,
     },
-    force,
     logger,
   );
 }
@@ -1037,27 +955,20 @@ type LoggedBatchScrape = {
   cancelled: boolean;
 };
 
-export async function logBatchScrape(
-  batchScrape: LoggedBatchScrape,
-  force: boolean = false,
-) {
+export async function logBatchScrape(batchScrape: LoggedBatchScrape) {
   return withLogSpan(
     {
       operation: "batch_scrape",
       table: "batch_scrapes",
       id: batchScrape.id,
       requestId: batchScrape.request_id,
-      force,
       zeroDataRetention: batchScrape.zeroDataRetention,
     },
-    () => logBatchScrapeInternal(batchScrape, force),
+    () => logBatchScrapeInternal(batchScrape),
   );
 }
 
-async function logBatchScrapeInternal(
-  batchScrape: LoggedBatchScrape,
-  force: boolean = false,
-) {
+async function logBatchScrapeInternal(batchScrape: LoggedBatchScrape) {
   const logger = _logger.child({
     module: "log_job",
     method: "logBatchScrape",
@@ -1081,7 +992,6 @@ async function logBatchScrapeInternal(
       credits_cost: batchScrape.credits_cost,
       cancelled: batchScrape.cancelled,
     },
-    force,
     logger,
   );
 }
@@ -1097,25 +1007,26 @@ export type LoggedSearch = {
   is_successful: boolean;
   error?: string;
   num_results: number;
+  num_results_by_source?: SearchResultCountsBySource;
+  result_categories?: SearchResultCategoriesBySource;
   results: any;
   zeroDataRetention: boolean;
 };
 
-export async function logSearch(search: LoggedSearch, force: boolean = false) {
+export async function logSearch(search: LoggedSearch) {
   return withLogSpan(
     {
       operation: "search",
       table: "searches",
       id: search.id,
       requestId: search.request_id,
-      force,
       zeroDataRetention: search.zeroDataRetention,
     },
-    () => logSearchInternal(search, force),
+    () => logSearchInternal(search),
   );
 }
 
-async function logSearchInternal(search: LoggedSearch, force: boolean = false) {
+async function logSearchInternal(search: LoggedSearch) {
   const logger = _logger.child({
     module: "log_job",
     method: "logSearch",
@@ -1143,6 +1054,18 @@ async function logSearchInternal(search: LoggedSearch, force: boolean = false) {
       succeeded: search.is_successful,
       creditsBilled: search.credits_cost,
       zeroDataRetention: search.zeroDataRetention,
+      // Position feedback bounds each `{source, position}` against the group
+      // it addresses, and attributes it to the vertical that served it. This
+      // is the record feedback reads, and the one the feedback window is
+      // enforced from, so the counts travel with it. `writeFeedbackJob`
+      // redacts both under zero data retention.
+      //
+      // Only v2 search reports counts. A v0/v1 search returns a flat list
+      // whose positions do not map to `{source, position}`, so it records `{}`
+      // and every position is rejected. Leaving it absent would read as a job
+      // that predates the field and accept any position unbounded.
+      numResultsBySource: search.num_results_by_source ?? {},
+      resultCategories: search.result_categories,
     },
     logger,
   );
@@ -1163,9 +1086,20 @@ async function logSearchInternal(search: LoggedSearch, force: boolean = false) {
       is_successful: search.is_successful,
       error: search.zeroDataRetention ? null : (search.error ?? null),
       num_results: search.num_results,
+      // Both are response-derived and both are redacted under zero data
+      // retention: the per-source split says how the result set was composed
+      // ({"web":3,"news":10} characterises the query's coverage in a way the
+      // combined total does not), and the category map says which vertical
+      // served each position. Feedback on a ZDR search is not persisted
+      // anyway, so neither column has a reader for those rows.
+      num_results_by_source: search.zeroDataRetention
+        ? null
+        : (search.num_results_by_source ?? null),
+      result_categories: search.zeroDataRetention
+        ? null
+        : (search.result_categories ?? null),
       time_taken: search.time_taken,
     },
-    force,
     logger,
   );
 
@@ -1190,16 +1124,16 @@ export type ResearchRequestKind =
   | "research_paper_inspect"
   | "research_paper_read"
   | "research_related_papers"
-  | "research_github_search"
-  | "code_search";
+  | "code_search"
+  | "gov_search";
 
 export type ResearchTableName =
   | "research_paper_searches"
   | "research_paper_inspects"
   | "research_paper_reads"
   | "research_related_papers"
-  | "research_github_searches"
-  | "code_searches";
+  | "code_searches"
+  | "gov_searches";
 
 type LoggedResearchEndpoint = {
   table: ResearchTableName;
@@ -1217,27 +1151,20 @@ type LoggedResearchEndpoint = {
   zeroDataRetention: boolean;
 };
 
-export async function logResearchEndpoint(
-  research: LoggedResearchEndpoint,
-  force: boolean = false,
-) {
+export async function logResearchEndpoint(research: LoggedResearchEndpoint) {
   return withLogSpan(
     {
       operation: "research",
       table: research.table,
       id: research.id,
       requestId: research.request_id,
-      force,
       zeroDataRetention: research.zeroDataRetention,
     },
-    () => logResearchEndpointInternal(research, force),
+    () => logResearchEndpointInternal(research),
   );
 }
 
-async function logResearchEndpointInternal(
-  research: LoggedResearchEndpoint,
-  force: boolean = false,
-) {
+async function logResearchEndpointInternal(research: LoggedResearchEndpoint) {
   const logger = _logger.child({
     module: "log_job",
     method: "logResearchEndpoint",
@@ -1269,7 +1196,6 @@ async function logResearchEndpointInternal(
       is_successful: research.is_successful,
       error: research.zeroDataRetention ? null : (research.error ?? null),
     },
-    force,
     logger,
   );
 }
@@ -1288,26 +1214,19 @@ export type LoggedExtract = {
   cost_tracking?: ReturnType<typeof CostTracking.prototype.toJSON>;
 };
 
-export async function logExtract(
-  extract: LoggedExtract,
-  force: boolean = false,
-) {
+export async function logExtract(extract: LoggedExtract) {
   return withLogSpan(
     {
       operation: "extract",
       table: "extracts",
       id: extract.id,
       requestId: extract.request_id,
-      force,
     },
-    () => logExtractInternal(extract, force),
+    () => logExtractInternal(extract),
   );
 }
 
-async function logExtractInternal(
-  extract: LoggedExtract,
-  force: boolean = false,
-) {
+async function logExtractInternal(extract: LoggedExtract) {
   const logger = _logger.child({
     module: "log_job",
     method: "logExtract",
@@ -1333,7 +1252,6 @@ async function logExtractInternal(
       error: extract.error ?? null,
       cost_tracking: extract.cost_tracking ?? null,
     },
-    force,
     logger,
   );
 
@@ -1369,21 +1287,20 @@ export type LoggedMap = {
   zeroDataRetention: boolean;
 };
 
-export async function logMap(map: LoggedMap, force: boolean = false) {
+export async function logMap(map: LoggedMap) {
   return withLogSpan(
     {
       operation: "map",
       table: "maps",
       id: map.id,
       requestId: map.request_id,
-      force,
       zeroDataRetention: map.zeroDataRetention,
     },
-    () => logMapInternal(map, force),
+    () => logMapInternal(map),
   );
 }
 
-async function logMapInternal(map: LoggedMap, force: boolean = false) {
+async function logMapInternal(map: LoggedMap) {
   const logger = _logger.child({
     module: "log_job",
     method: "logMap",
@@ -1423,7 +1340,6 @@ async function logMapInternal(map: LoggedMap, force: boolean = false) {
       num_results: map.results.length,
       credits_cost: map.credits_cost,
     },
-    force,
     logger,
   );
 
@@ -1444,26 +1360,19 @@ export type LoggedLlmsTxt = {
   result: { llmstxt: string; llmsfulltxt: string };
 };
 
-export async function logLlmsTxt(
-  llmsTxt: LoggedLlmsTxt,
-  force: boolean = false,
-) {
+export async function logLlmsTxt(llmsTxt: LoggedLlmsTxt) {
   return withLogSpan(
     {
       operation: "llmstxt",
       table: "llmstxts",
       id: llmsTxt.id,
       requestId: llmsTxt.request_id,
-      force,
     },
-    () => logLlmsTxtInternal(llmsTxt, force),
+    () => logLlmsTxtInternal(llmsTxt),
   );
 }
 
-async function logLlmsTxtInternal(
-  llmsTxt: LoggedLlmsTxt,
-  force: boolean = false,
-) {
+async function logLlmsTxtInternal(llmsTxt: LoggedLlmsTxt) {
   const logger = _logger.child({
     module: "log_job",
     method: "logLlmsTxt",
@@ -1487,7 +1396,6 @@ async function logLlmsTxtInternal(
       credits_cost: llmsTxt.credits_cost,
       cost_tracking: llmsTxt.cost_tracking ?? null,
     },
-    force,
     logger,
   );
 
@@ -1508,26 +1416,19 @@ export type LoggedDeepResearch = {
   cost_tracking?: ReturnType<typeof CostTracking.prototype.toJSON>;
 };
 
-export async function logDeepResearch(
-  deepResearch: LoggedDeepResearch,
-  force: boolean = false,
-) {
+export async function logDeepResearch(deepResearch: LoggedDeepResearch) {
   return withLogSpan(
     {
       operation: "deep_research",
       table: "deep_researches",
       id: deepResearch.id,
       requestId: deepResearch.request_id,
-      force,
     },
-    () => logDeepResearchInternal(deepResearch, force),
+    () => logDeepResearchInternal(deepResearch),
   );
 }
 
-async function logDeepResearchInternal(
-  deepResearch: LoggedDeepResearch,
-  force: boolean = false,
-) {
+async function logDeepResearchInternal(deepResearch: LoggedDeepResearch) {
   const logger = _logger.child({
     module: "log_job",
     method: "logDeepResearch",
@@ -1552,11 +1453,43 @@ async function logDeepResearchInternal(
       credits_cost: deepResearch.credits_cost,
       cost_tracking: deepResearch.cost_tracking ?? null,
     },
-    force,
     logger,
   );
 
   if (deepResearch.result) {
     await saveDeepResearchToGCS(deepResearch, logger);
   }
+}
+
+type LoggedMcpActionLog = {
+  id: string;
+  team_id: string;
+  request_id: string;
+  [field: string]: unknown;
+};
+
+/**
+ * One hosted MCP tool call from the internal action-log ingest. `id` is the
+ * MCP request id, so retried deliveries collapse into one row.
+ */
+export async function logMcpActionLog(action: LoggedMcpActionLog) {
+  return withLogSpan(
+    {
+      operation: "mcp_action",
+      table: "mcp_action_logs",
+      id: action.id,
+      requestId: action.request_id,
+    },
+    () => logMcpActionLogInternal(action),
+  );
+}
+
+async function logMcpActionLogInternal(action: LoggedMcpActionLog) {
+  const logger = _logger.child({
+    module: "log_job",
+    method: "logMcpActionLog",
+    requestId: action.request_id,
+    teamId: action.team_id,
+  });
+  await robustInsert("mcp_action_logs", action, logger);
 }

@@ -10,6 +10,7 @@ import {
 } from "../../../lib/cost-tracking";
 import { calculateCost } from "../transformers/llmExtract";
 import { PromptInjectionDetectedError } from "../error";
+import type { TeamFlags } from "../../../controllers/v2/types";
 
 const GUARD_MODEL = "gpt-4o-mini";
 const GUARD_MAX_CHUNK_CHARS = 32000;
@@ -58,6 +59,13 @@ function buildGuardSystemPrompt(tagName: string): string {
   ].join(" ");
 }
 
+type GuardTelemetryMetadata = {
+  teamId: string;
+  functionId?: string;
+  scrapeId?: string;
+  extractId?: string;
+};
+
 // "none" marks a chunk the guard failed open on. Billing reads it: the guard
 // fee is charged only when every chunk got a verdict (see scrape-billing.ts).
 type GuardVerdict = "clean" | "injection" | "none";
@@ -88,7 +96,7 @@ async function classifyChunk(
   modelId: string,
   logger: Logger,
   costTracking: CostTracking,
-  metadata: { teamId: string; functionId?: string },
+  metadata: GuardTelemetryMetadata,
   zeroDataRetention: boolean,
 ): Promise<boolean> {
   const tagName = `untrusted_page_content_${crypto.randomUUID()}`;
@@ -113,7 +121,11 @@ async function classifyChunk(
         functionId: metadata.functionId
           ? metadata.functionId + "/promptInjectionGuard"
           : "promptInjectionGuard",
-        metadata: { teamId: metadata.teamId },
+        metadata: {
+          teamId: metadata.teamId,
+          ...(metadata.scrapeId ? { scrapeId: metadata.scrapeId } : {}),
+          ...(metadata.extractId ? { extractId: metadata.extractId } : {}),
+        },
       },
     });
 
@@ -127,11 +139,11 @@ async function classifyChunk(
 
     if (result.object.isInjection) {
       logger.warn(
-        "Prompt injection detected in scraped content; blocking JSON extraction",
+        "Prompt injection detected in scraped content; blocking the scrape",
         { reason: result.object.reason },
       );
       throw new PromptInjectionDetectedError(
-        `The scraped page content appears to contain a prompt injection attempt, so JSON extraction was aborted for safety. Guard verdict: ${result.object.reason.slice(0, 300)}`,
+        `The scraped page content appears to contain a prompt injection attempt, so the scrape was aborted for safety. Guard verdict: ${result.object.reason.slice(0, 300)}`,
       );
     }
     return true;
@@ -172,20 +184,22 @@ export function createPromptInjectionGuardLimiter(): Semaphore {
 
 // Throws PromptInjectionDetectedError on a detection. Otherwise resolves to
 // false when the guard failed open on at least one chunk, i.e. part of the
-// content reached extraction unscanned.
+// content went unscanned.
 export async function checkForPromptInjection({
   markdown,
   logger,
   costTracking,
   metadata,
   zeroDataRetention,
+  teamFlags,
   limiter = createPromptInjectionGuardLimiter(),
 }: {
   markdown: string | undefined;
   logger: Logger;
   costTracking: CostTracking;
-  metadata: { teamId: string; functionId?: string };
+  metadata: GuardTelemetryMetadata;
   zeroDataRetention: boolean;
+  teamFlags?: TeamFlags | null;
   limiter?: Semaphore;
 }): Promise<boolean> {
   if (!markdown || markdown.trim().length === 0) {
@@ -199,7 +213,10 @@ export async function checkForPromptInjection({
     GUARD_CHUNK_OVERLAP_CHARS,
   );
 
-  const model = getModel(GUARD_MODEL, "openai");
+  const model = getModel(GUARD_MODEL, "openai", {
+    teamFlags,
+    feature: "The prompt injection check",
+  });
   const modelId = typeof model === "string" ? model : model.modelId;
 
   // Batched so a detection stops later batches from ever being scheduled, and so a huge page can't burst past rate limits.

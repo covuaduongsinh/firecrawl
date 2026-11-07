@@ -159,6 +159,7 @@ export enum RateLimiterMode {
   SupportDocsSearch = "supportDocsSearch",
   Research = "research",
   DeveloperSearch = "developerSearch",
+  GovSearch = "govSearch",
   Labs = "labs",
   Exchange = "exchange",
   ExchangeDiscover = "exchangeDiscover",
@@ -171,6 +172,8 @@ export type AuthResponse =
       org_id?: string | null;
       api_key?: string;
       chunk: AuthCreditUsageChunk | null;
+      // The hosted MCP made the call, as verified in supaAuthenticateUser.
+      hostedMcp?: boolean;
     }
   | {
       success: false;
@@ -182,6 +185,8 @@ export type AuthResponse =
       // Machine-readable keyless quota details for trusted MCP recovery.
       keylessReason?: "requests" | "credits";
       retryAfterSeconds?: number;
+      // Keyless prompts: the signup link in `error`, for clients that relay it.
+      signupUrl?: string;
     };
 
 export enum NotificationType {

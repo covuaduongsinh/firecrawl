@@ -9,6 +9,8 @@ import { scrapePDFWithFirePDF } from "../firePDF";
 import { cancelJob } from "./cancel";
 import { maybeSaveResult, provenanceFromResponse, tryGetCached } from "./cache";
 import { resolvePdfCacheKey } from "../../../../../lib/gcs-pdf-cache";
+import { isUsOnly, US_DATA_REGION } from "../../../../../lib/us-only";
+import { firePdfUsOnlyRefusal } from "./data-region";
 import {
   firePdfAsyncAbandonedTotal,
   firePdfAsyncTotalDurationSeconds,
@@ -19,7 +21,7 @@ import { fetchResult } from "./result";
 import type { FirePdfByReferenceInput } from "./by-reference";
 import type { FirePdfAdoptedJobInput } from "./lookup";
 import { FIRE_PDF_ASYNC_MIN_REMAINING_MS } from "./routing";
-import { POLL_FLOOR_MS, POLL_TIMEOUT_BUFFER_MS } from "./schema";
+import { POLL_TIMEOUT_BUFFER_MS } from "./schema";
 import { submitJob, SubmitJobMayHaveBeenAcceptedError } from "./submit";
 import {
   computeByReferenceDeadlineMs,
@@ -219,7 +221,7 @@ export async function scrapePDFWithFirePDFAsync(
 
   try {
     let alreadyDone = false;
-    let initialDelay: number = POLL_FLOOR_MS;
+    let initialDelay: number | undefined;
     if (wireInput === null) {
       meta.logger.info("FirePDF async adopting existing job", {
         scrapeId: meta.id,
@@ -256,7 +258,7 @@ export async function scrapePDFWithFirePDFAsync(
       });
       submissionAccepted = true;
       alreadyDone = submit.alreadyDone;
-      initialDelay = submit.retryAfterMs ?? POLL_FLOOR_MS;
+      initialDelay = submit.retryAfterMs;
       if (byReference && !alreadyDone && meta.largePdfProcessing) {
         // The job now exists server-side and (per the cancel policy
         // above) will keep running if this scrape is abandoned — record
@@ -284,6 +286,8 @@ export async function scrapePDFWithFirePDFAsync(
           baseUrl,
           scrapeId: jobScrapeId,
           initialDelay,
+          pagesEstimate: pagesProcessed,
+          longPollWaitMs: config.FIRE_PDF_ASYNC_WAIT_MS,
           pollingDeadline,
           meta,
           fetchImpl,
@@ -325,7 +329,8 @@ export async function scrapePDFWithFirePDFAsync(
       error instanceof FirePdfAsyncFailure &&
       (error.reason === "terminal_failed" ||
         error.reason === "terminal_expired" ||
-        error.reason === "terminal_cancelled");
+        error.reason === "terminal_cancelled" ||
+        error.reason === "region_unavailable");
     if ((jobAlreadyTerminal || terminalReached) && meta.largePdfProcessing) {
       // The job is dead — a "processing continues" message would lie.
       meta.largePdfProcessing.current = undefined;
@@ -369,6 +374,12 @@ export async function scrapePDFWithFirePDFAsync(
     ) {
       await cancelJob({ baseUrl, scrapeId: meta.id, meta, fetchImpl });
     }
+    if (
+      error instanceof FirePdfAsyncFailure &&
+      error.reason === "region_unavailable"
+    ) {
+      throw firePdfUsOnlyRefusal(meta, "region_unavailable");
+    }
     throw submitMayHaveBeenAccepted ? error.originalError : error;
   }
 
@@ -377,6 +388,15 @@ export async function scrapePDFWithFirePDFAsync(
   // failAsync throws must not leave stale processing state behind).
   if (meta.largePdfProcessing) {
     meta.largePdfProcessing.current = undefined;
+  }
+
+  // Adopted jobs included: a job that ran before the pin existed carries no
+  // echo, and its result may have come from GPU capacity outside the US.
+  if (
+    isUsOnly(meta.internalOptions.teamFlags ?? undefined) &&
+    fetched.data_region_applied !== US_DATA_REGION
+  ) {
+    throw firePdfUsOnlyRefusal(meta, "region_unconfirmed");
   }
 
   // ── Assemble + cache save ─────────────────────────────────────────────
@@ -403,7 +423,9 @@ export async function scrapePDFWithFirePDFAsync(
     });
   }
   const durationMs = now() - overallStartedAt;
-  firePdfAsyncTotalDurationSeconds.observe(durationMs / 1000);
+  firePdfAsyncTotalDurationSeconds
+    .labels(meta.internalOptions.crawlId ? "bulk" : "interactive")
+    .observe(durationMs / 1000);
 
   const cacheKey = resolvePdfCacheKey(cacheInput);
   const provenance = provenanceFromResponse(fetched.provenance, meta.logger, {

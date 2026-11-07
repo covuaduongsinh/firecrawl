@@ -8,7 +8,8 @@ import {
   type SearchResultImages,
 } from "../types";
 import { HttpClient } from "../utils/httpClient";
-import { ensureValidScrapeOptions } from "../utils/validation";
+import { agentHintMetadata } from "../utils/agentHints";
+import { ensureNoV1Options, ensureValidScrapeOptions } from "../utils/validation";
 import {
   throwForBadResponse,
   normalizeAxiosError,
@@ -16,6 +17,7 @@ import {
 
 function prepareSearchPayload(req: SearchRequest): Record<string, unknown> {
   if (!req.query || !req.query.trim()) throw new Error("Query cannot be empty");
+  ensureNoV1Options(req, "search");
   if (req.limit != null && req.limit <= 0)
     throw new Error("limit must be positive");
   if (req.timeout != null && req.timeout <= 0)
@@ -101,13 +103,14 @@ export async function search(
       throwForBadResponse(res, "search");
     }
     const data = (res.data.data || {}) as Record<string, any>;
-    const out: SearchData = {};
+    const out: SearchData = { ...agentHintMetadata(res.data) };
     if (res.data.warning) out.warning = res.data.warning;
     if (data.web) out.web = transformArray<SearchResultWeb>(data.web);
     if (data.news) out.news = transformArray<SearchResultNews>(data.news);
     if (data.images)
       out.images = transformArray<SearchResultImages>(data.images);
     if (data.tools) out.tools = data.tools;
+    if (data.skills) out.skills = data.skills;
     Object.defineProperty(out, "data", {
       get() {
         const parts: string[] = [];
@@ -117,9 +120,11 @@ export async function search(
           parts.push(`.images (${out.images.length} results)`);
         if (out.tools?.length)
           parts.push(`.tools (${out.tools.length} results)`);
+        if (out.skills?.length)
+          parts.push(`.skills (${out.skills.length} results)`);
         const available = parts.length
           ? parts.join(", ")
-          : ".web, .news, .images, or .tools";
+          : ".web, .news, .images, .tools, or .skills";
         throw new Error(
           `SearchData has no '.data'. Results are grouped by source: ${available}`,
         );

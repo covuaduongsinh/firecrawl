@@ -36,6 +36,36 @@ describeIf(TEST_PRODUCTION || HAS_SEARCH || HAS_PROXY)("Search tests", () => {
   );
 
   it.concurrent(
+    "ignores legacy client model on search requests",
+    async () => {
+      const body = {
+        query: "firecrawl documentation",
+        clientModel: "claude-sonnet-4-6",
+        limit: 1,
+      };
+      const res = await search(body, identity);
+      expect(res.web?.length).toBeGreaterThan(0);
+    },
+    60000,
+  );
+
+  it.concurrent(
+    "ignores legacy objective on search requests",
+    async () => {
+      const body = {
+        query: "firecrawl",
+        objective: "Find official documentation",
+        limit: 1,
+      };
+      const res = await searchRaw(body, identity);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.web?.length).toBeGreaterThan(0);
+    },
+    60000,
+  );
+
+  it.concurrent(
     "works with includeDomains",
     async () => {
       const res = await search(
@@ -308,6 +338,58 @@ describeIf(TEST_PRODUCTION || HAS_SEARCH || HAS_PROXY)("Search tests", () => {
     60000,
   );
 
+  concurrentIf(TEST_PRODUCTION)(
+    "targets the country named by location when country is omitted",
+    async () => {
+      const res = await search(
+        {
+          query: "gobierno",
+          location: "Mexico",
+        },
+        identity,
+      );
+      const topHosts = (res.web ?? [])
+        .slice(0, 3)
+        .map(result => new URL(result.url).hostname);
+      expect(topHosts.some(host => host.endsWith("gob.mx"))).toBe(true);
+    },
+    60000,
+  );
+
+  concurrentIf(TEST_PRODUCTION)(
+    "targets the country's location when location is omitted",
+    async () => {
+      const res = await search(
+        {
+          query: "gobierno",
+          country: "mx",
+        },
+        identity,
+      );
+      const topHosts = (res.web ?? [])
+        .slice(0, 3)
+        .map(result => new URL(result.url).hostname);
+      expect(topHosts.some(host => host.endsWith("gob.mx"))).toBe(true);
+    },
+    60000,
+  );
+
+  it.concurrent(
+    "rejects non-string location",
+    async () => {
+      const res = await searchWithFailure(
+        {
+          query: "firecrawl",
+          location: 123,
+        } as any,
+        identity,
+      );
+
+      expect(res.error).toBe("Invalid request body");
+    },
+    60000,
+  );
+
   // SEARXNG-specific pagination tests
   concurrentIf(!!config.SEARXNG_ENDPOINT)(
     "searxng respects limit of 2 results",
@@ -397,7 +479,7 @@ describeIf(TEST_PRODUCTION || HAS_SEARCH || HAS_PROXY)(
       "stays silent for every other category",
       async () => {
         const raw = await searchRaw(
-          { query: "firecrawl", categories: ["github"] },
+          { query: "firecrawl", categories: ["pdf"] },
           identity,
         );
         expect(raw.statusCode).toBe(200);

@@ -47,6 +47,11 @@ import {
   addScrapeJobs,
 } from "../queue-jobs";
 import { parseHostname } from "../../lib/url-utils";
+import {
+  detectSerpPage,
+  serpScrapeWarning,
+  serpScrapeWarningEnabled,
+} from "../../lib/serp-url";
 import { getJobPriority } from "../../lib/job-priority";
 import { Document, scrapeOptions, TeamFlags } from "../../controllers/v2/types";
 import { hasFormatOfType } from "../../lib/format-utils";
@@ -61,7 +66,7 @@ import { normalizeUrlOnlyHostname } from "../../lib/canonical-url";
 import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 
 import { generateURLSplits, queryIndexAtSplitLevel } from "../index";
-import { WebCrawler } from "../../scraper/WebScraper/crawler";
+import { DenialReason, WebCrawler } from "../../scraper/WebScraper/crawler";
 import {
   calculateCreditsToBeBilled,
   calculateThreatScanCredits,
@@ -128,11 +133,10 @@ if (require.main === module) {
   warmExchangeCatalog();
 }
 
-// The org for a job's Autumn lookups. It rides the job payload, snapshotted
-// from the request ACUC at acceptance; the ACUC answers only for a job
-// enqueued without one (monitor jobs null it deliberately, since the field
-// also gates blocklist enforcement) — the same lookup getJobPriority used to
-// make for itself, now hoisted to once per job instead of once per link.
+// The org for a job's billing. It rides the job payload, snapshotted from the
+// request ACUC at acceptance; the ACUC answers only for a job enqueued without
+// one (monitor jobs null it deliberately, since the field also gates blocklist
+// enforcement).
 async function orgIdForJob(
   orgIdFromJob: string | null | undefined,
   teamId: string,
@@ -165,7 +169,12 @@ async function billScrapeJob(
   // Scrapes initiated by a search (billing.endpoint === "search", e.g. search +
   // scrapeOptions) are metered against SEARCH_CREDITS, matching the search
   // request's own credits. Standalone scrapes stay on CREDITS.
-  const featureId = featureIdForBillingEndpoint(billing.endpoint);
+  const featureId = billing.hostedMcp
+    ? await autumnService.hostedMcpFeatureId(
+        job.data.team_id,
+        featureIdForBillingEndpoint(billing.endpoint),
+      )
+    : featureIdForBillingEndpoint(billing.endpoint);
   let trackedInRequest = false;
 
   if (job.data.is_scrape !== true && !job.data.internalOptions?.bypassBilling) {
@@ -199,12 +208,7 @@ async function billScrapeJob(
         job.data.team_id,
       );
 
-      // Resolved outside the try so the catch's refund decision can see it.
-      let routedToFirebill = false;
       try {
-        routedToFirebill = orgId
-          ? await autumnService.isRoutedThroughFirebill(job.data.team_id, orgId)
-          : false;
         trackedInRequest = orgId
           ? await autumnService.trackCredits({
               teamId: job.data.team_id,
@@ -216,20 +220,19 @@ async function billScrapeJob(
               // (a crawl id is shared by every page — keying on it would collapse
               // a crawl's pages into one billed event) AND survives a stall
               // requeue, which re-runs the job under the same id: with this key,
-              // the re-run dedupes instead of double-billing (firebill route).
+              // the re-run dedupes instead of double-billing.
               idempotencyKey: `fc:track:${billing.endpoint}:${job.id}`,
               // The caller's own operation id, carried on the charge so
               // firebill reports it without a request lookup.
               externalRequestId: billing.externalRequestId ?? undefined,
             })
           : false;
-        // On the firebill route the ledger enqueue must be idempotent by the
-        // originating job: a stalled job reruns under the same job.id, the
-        // track dedupes in firebill, and a fresh random billing job id would
-        // debit the ledger twice (the same pattern monitors already use with
-        // their deterministic monitor-bill-{id}). Off the route, behavior is
-        // unchanged.
-        const billingJobId = routedToFirebill ? `bill-${job.id}` : uuidv7();
+        // The ledger enqueue must be idempotent by the originating job: a
+        // stalled job reruns under the same job.id, the track dedupes in
+        // firebill, and a fresh random billing job id would debit the ledger
+        // twice (the same pattern monitors already use with their
+        // deterministic monitor-bill-{id}).
+        const billingJobId = `bill-${job.id}`;
         logger.debug(
           `Adding billing job to queue for team ${job.data.team_id}`,
           {
@@ -245,14 +248,12 @@ async function billScrapeJob(
         // debit actually commits. A failed commit leaves the event pending
         // for reconciliation - it is never voided on an ambiguous outcome.
         //
-        // On the firebill route the enqueue is retried a few times before
-        // giving up: the Autumn charge is durable and will not be refunded
-        // (see the catch below), so a dropped enqueue would leave the ledger
-        // permanently un-debited. Retries are safe there BECAUSE the job id
-        // is deterministic — a duplicate add dedupes in BullMQ. Off the
-        // route the id is random, so it keeps today's single attempt (the
-        // compensating refund covers it).
-        const enqueueAttempts = routedToFirebill ? 3 : 1;
+        // The enqueue is retried a few times before giving up: the Autumn
+        // charge is durable and will not be refunded (see the catch below),
+        // so a dropped enqueue would leave the ledger permanently
+        // un-debited. Retries are safe BECAUSE the job id is deterministic —
+        // a duplicate add dedupes in BullMQ.
+        const enqueueAttempts = 3;
         for (let attempt = 1; ; attempt++) {
           try {
             await getBillingQueue().add(
@@ -294,39 +295,25 @@ async function billScrapeJob(
           `Failed to add billing job to queue for team ${job.data.team_id} for ${creditsToBeBilled} credits`,
           { error },
         );
-        if (trackedInRequest && creditsToBeBilled !== null) {
-          if (routedToFirebill) {
-            // No compensating refund on the firebill route: the tracked charge
-            // is durable and correct (the scrape ran), and refunding it here
-            // poisons any rerun — its track would dedupe against the intent
-            // row (no new charge) while the enqueue succeeds, leaving Autumn
-            // net-zero for work the ledger billed. Reaching this line means
-            // the bounded enqueue retries above were exhausted: the ledger is
-            // un-debited for this charge until reconciliation (or a stall
-            // rerun's deterministic bill-{job.id} enqueue) repairs it — hence
-            // error level, with everything needed to replay by hand.
-            logger.error(
-              "billing enqueue failed after retries on the firebill route; charge stands, ledger un-debited pending reconciliation",
-              {
-                jobId: job.id,
-                teamId: job.data.team_id,
-                credits: creditsToBeBilled,
-                billing,
-              },
-            );
-          } else if (orgId) {
-            await autumnService.refundCredits({
+        if (trackedInRequest) {
+          // No compensating refund: the tracked charge is durable and correct
+          // (the scrape ran), and refunding it here poisons any rerun — its
+          // track would dedupe against the intent row (no new charge) while
+          // the enqueue succeeds, leaving Autumn net-zero for work the ledger
+          // billed. Reaching this line means the bounded enqueue retries above
+          // were exhausted: the ledger is un-debited for this charge until
+          // reconciliation (or a stall rerun's deterministic bill-{job.id}
+          // enqueue) repairs it — hence error level, with everything needed
+          // to replay by hand.
+          logger.error(
+            "billing enqueue failed after retries; charge stands, ledger un-debited pending reconciliation",
+            {
+              jobId: job.id,
               teamId: job.data.team_id,
-              orgId,
-              value: creditsToBeBilled,
-              properties: autumnProperties,
-              featureId,
-              // Distinct from the track key: a refund is its own charge event
-              // (same key would 409 as a duplicate of the track and be dropped).
-              idempotencyKey: `fc:refund:${billing.endpoint}:${job.id}`,
-              externalRequestId: billing.externalRequestId ?? undefined,
-            });
-          }
+              credits: creditsToBeBilled,
+              billing,
+            },
+          );
         }
         // The billing operation never reached the queue, so no debit will
         // commit and no confirmation will ever arrive: void the Exchange
@@ -435,6 +422,21 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
       if (sc && sc.cancelled) {
         throw new JobCancelledError();
       }
+
+      // Discovered, sitemap and index URLs pass filterLinks before they are
+      // queued. The start URL is not, so check it here, before it is fetched.
+      if (
+        job.data.isCrawlSourceScrape &&
+        !crawlToCrawler(
+          job.data.crawl_id,
+          sc,
+          (await getACUCTeam(job.data.team_id))?.flags ?? null,
+        ).isRobotsAllowed(job.data.url)
+      ) {
+        throw new CrawlDenialError(DenialReason.ROBOTS_TXT, {
+          robotsBlockedUrl: job.data.url,
+        });
+      }
     }
 
     let timeoutHandle: NodeJS.Timeout | null = null;
@@ -525,6 +527,26 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
         (doc.warning ? " " + doc.warning : "");
     }
 
+    const billingEndpoint = job.data.billing?.endpoint;
+    if (billingEndpoint === "scrape" || billingEndpoint === "batch_scrape") {
+      const serpPage = detectSerpPage(job.data.url);
+      if (serpPage !== null) {
+        // Logged whether or not the warning is shown, so the rollout can be
+        // compared with teams outside it.
+        const warned = serpScrapeWarningEnabled(job.data.team_id);
+        logger.info("SERP scrape", {
+          serpEngine: serpPage.engine,
+          serpWarningShown: warned,
+          billingEndpoint,
+        });
+        if (warned) {
+          doc.warning =
+            serpScrapeWarning(serpPage.engine) +
+            (doc.warning ? " " + doc.warning : "");
+        }
+      }
+    }
+
     const data = {
       success: true,
       result: {
@@ -576,6 +598,14 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
           normalizeURL(doc.metadata.sourceURL, sc) &&
         crawler // only on crawls, don't care on batch scrape
       ) {
+        // The engine has already followed the redirect, so this can only
+        // keep a disallowed target out of the crawl.
+        if (!crawler.isRobotsAllowed(doc.metadata.url)) {
+          throw new CrawlDenialError(DenialReason.ROBOTS_TXT, {
+            robotsBlockedUrl: doc.metadata.url,
+          });
+        }
+
         const filterResult = await crawler!.filterURL(
           doc.metadata.url,
           doc.metadata.sourceURL,
@@ -646,12 +676,7 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
               linksLength: links.links.length,
             });
 
-            // Store robots blocked URLs in Redis set
-            for (const [url, reason] of links.denialReasons) {
-              if (reason === "URL blocked by robots.txt") {
-                await recordRobotsBlocked(job.data.crawl_id, url);
-              }
-            }
+            await recordRobotsBlocked(job.data.crawl_id, links.robotsBlocked);
 
             // Threat protection: silently skip blocked discovered links
             // (cross-domain links included) — the crawl continues. Skipped
@@ -721,10 +746,10 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
               }
             }
 
-            // Hoisted: one org resolution per job, not one per discovered link.
-            const crawlOrgId =
+            // Hoisted: one ACUC read per job, not one per discovered link.
+            const crawlACUC =
               discoveredLinks.length > 0
-                ? await orgIdForJob(sc.internalOptions?.orgId, sc.team_id)
+                ? await getACUCTeam(sc.team_id).catch(() => null)
                 : null;
 
             for (const link of discoveredLinks) {
@@ -732,7 +757,7 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
                 // This seems to work really welel
                 const jobPriority = await getJobPriority({
                   team_id: sc.team_id,
-                  org_id: crawlOrgId,
+                  acuc: crawlACUC,
                   basePriority: job.data.crawl_id ? 20 : 10,
                 });
                 const jobId = uuidv7();
@@ -808,7 +833,11 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
               const reason =
                 filterResult.denialReasons.get(url) ||
                 `The source URL ("${url}") you provided as the starting point for this crawl is not allowed by your own crawl configuration. This can happen if your includePaths, excludePaths, maxDepth, or other filters exclude the starting URL itself. Please check your crawl configuration to ensure the starting URL is allowed.`;
-              throw new CrawlDenialError(reason);
+              throw new CrawlDenialError(reason, {
+                robotsBlockedUrl: filterResult.robotsBlocked.includes(url)
+                  ? url
+                  : null,
+              });
             }
           }
         }
@@ -835,28 +864,25 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
       doc.metadata.creditsUsed = credits_billed ?? undefined;
 
       logger.debug("Logging job to DB...");
-      await logScrape(
-        {
-          id: job.id,
-          request_id: job.data.requestId ?? job.data.crawl_id ?? job.id,
-          url: job.data.url,
-          is_successful: true,
-          doc,
-          time_taken: timeTakenInSeconds,
-          team_id: job.data.team_id,
-          options: job.data.scrapeOptions,
-          cost_tracking: costTracking.toJSON(),
-          pdf_num_pages: doc.metadata.numPages,
-          content_type: doc.metadata.contentType,
-          credits_cost: credits_billed ?? 0,
-          zeroDataRetention: job.data.zeroDataRetention,
-          skipNuq: job.data.skipNuq ?? false,
-          is_parse: Boolean(job.data.internalOptions?.isParse),
-          monitor_id: job.data.monitoring?.monitorId,
-          monitor_check_id: job.data.monitoring?.checkId,
-        },
-        true,
-      );
+      await logScrape({
+        id: job.id,
+        request_id: job.data.requestId ?? job.data.crawl_id ?? job.id,
+        url: job.data.url,
+        is_successful: true,
+        doc,
+        time_taken: timeTakenInSeconds,
+        team_id: job.data.team_id,
+        options: job.data.scrapeOptions,
+        cost_tracking: costTracking.toJSON(),
+        pdf_num_pages: doc.metadata.numPages,
+        content_type: doc.metadata.contentType,
+        credits_cost: credits_billed ?? 0,
+        zeroDataRetention: job.data.zeroDataRetention,
+        skipNuq: job.data.skipNuq ?? false,
+        is_parse: Boolean(job.data.internalOptions?.isParse),
+        monitor_id: job.data.monitoring?.monitorId,
+        monitor_check_id: job.data.monitoring?.checkId,
+      });
 
       trackScrape({
         scrapeId: job.id,
@@ -965,7 +991,6 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
           monitor_id: job.data.monitoring?.monitorId,
           monitor_check_id: job.data.monitoring?.checkId,
         },
-        false,
         { onStateWritten: stateWritten },
       );
       // Release the barrier if logging dies before the state write settles.
@@ -1051,9 +1076,9 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
         job.data.crawl_id &&
         job.data.crawlerOptions !== null &&
         error instanceof CrawlDenialError &&
-        error.reason === "URL blocked by robots.txt"
+        error.robotsBlockedUrl !== null
       ) {
-        await recordRobotsBlocked(job.data.crawl_id, job.data.url);
+        await recordRobotsBlocked(job.data.crawl_id, [error.robotsBlockedUrl]);
       }
     } catch (e) {
       logger.debug("Failed to record top-level robots block", { e });
@@ -1206,30 +1231,28 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
     }
 
     logger.debug("Logging job to DB...");
-    await logScrape(
-      {
-        id: job.id,
-        request_id: job.data.requestId ?? job.data.crawl_id ?? job.id,
-        url: job.data.url,
-        is_successful: false,
-        error:
-          typeof error === "string"
-            ? error
-            : (error.message ??
-              "Something went wrong... Contact help@mendable.ai"),
-        time_taken: timeTakenInSeconds,
-        team_id: job.data.team_id,
-        options: job.data.scrapeOptions,
-        cost_tracking: costTracking.toJSON(),
-        credits_cost: credits_billed ?? 0,
-        zeroDataRetention: job.data.zeroDataRetention,
-        skipNuq: job.data.skipNuq ?? false,
-        is_parse: Boolean(job.data.internalOptions?.isParse),
-        monitor_id: job.data.monitoring?.monitorId,
-        monitor_check_id: job.data.monitoring?.checkId,
-      },
-      true,
-    );
+    await logScrape({
+      id: job.id,
+      request_id: job.data.requestId ?? job.data.crawl_id ?? job.id,
+      url: job.data.url,
+      is_successful: false,
+      error:
+        typeof error === "string"
+          ? error
+          : (error.message ??
+            "Something went wrong... Contact help@mendable.ai"),
+      error_code: error instanceof TransportableError ? error.code : undefined,
+      time_taken: timeTakenInSeconds,
+      team_id: job.data.team_id,
+      options: job.data.scrapeOptions,
+      cost_tracking: costTracking.toJSON(),
+      credits_cost: credits_billed ?? 0,
+      zeroDataRetention: job.data.zeroDataRetention,
+      skipNuq: job.data.skipNuq ?? false,
+      is_parse: Boolean(job.data.internalOptions?.isParse),
+      monitor_id: job.data.monitoring?.monitorId,
+      monitor_check_id: job.data.monitoring?.checkId,
+    });
 
     trackScrape({
       scrapeId: job.id,
@@ -1253,6 +1276,7 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
 }
 
 async function kickoffGetIndexLinks(
+  crawlId: string,
   sc: StoredCrawl,
   crawler: WebCrawler,
   url: string,
@@ -1271,15 +1295,15 @@ async function kickoffGetIndexLinks(
     sc.crawlerOptions.limit ?? 10000,
   );
 
-  const validIndexLinksResult = await crawler.filterLinks(
+  const { links, robotsBlocked } = await crawler.filterLinks(
     index,
     sc.crawlerOptions.limit ?? 10000,
     sc.crawlerOptions.maxDepth ?? 10,
     false,
   );
-  const validIndexLinks = validIndexLinksResult.links;
+  await recordRobotsBlocked(crawlId, robotsBlocked);
 
-  return validIndexLinks;
+  return links;
 }
 
 async function addKickoffSitemapJob(
@@ -1393,7 +1417,6 @@ async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
       jobId,
       await getJobPriority({
         team_id: job.data.team_id,
-        org_id: await orgIdForJob(sc.internalOptions?.orgId, job.data.team_id),
         basePriority: 15,
       }),
     );
@@ -1450,7 +1473,12 @@ async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
       }
     }
 
-    let indexLinks = await kickoffGetIndexLinks(sc, crawler, job.data.url);
+    let indexLinks = await kickoffGetIndexLinks(
+      job.data.crawl_id,
+      sc,
+      crawler,
+      job.data.url,
+    );
 
     // Threat protection: skip blocked index-sourced discoveries (URL-level
     // checks; first-time blocks are recorded and billed, see below).
@@ -1511,10 +1539,6 @@ async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
 
       let jobPriority = await getJobPriority({
         team_id: job.data.team_id,
-        org_id: await orgIdForJob(
-          job.data.internalOptions?.orgId,
-          job.data.team_id,
-        ),
         basePriority: 21,
       });
       logger.debug("Using job priority " + jobPriority, { jobPriority });
@@ -1613,20 +1637,21 @@ async function processKickoffSitemapJob(job: NuQJob<ScrapeJobKickoffSitemap>) {
       url: job.data.sitemapUrl,
       maxAge: 48 * 60 * 60 * 1000,
       zeroDataRetention: job.data.zeroDataRetention ?? false,
+      usOnly: crawler.usOnly,
       location: job.data.location,
       crawlId: job.data.crawl_id,
       logger,
       isPreCrawl: sc.internalOptions?.isPreCrawl ?? false,
     });
 
-    let passingURLs = (
-      await crawler.filterLinks(
-        results.urls.map(x => x.href),
-        Infinity,
-        sc.crawlerOptions.maxDepth ?? 10,
-        false,
-      )
-    ).links;
+    const sitemapLinks = await crawler.filterLinks(
+      results.urls.map(x => x.href),
+      Infinity,
+      sc.crawlerOptions.maxDepth ?? 10,
+      false,
+    );
+    await recordRobotsBlocked(job.data.crawl_id, sitemapLinks.robotsBlocked);
+    let passingURLs = sitemapLinks.links;
 
     // Threat protection: skip blocked sitemap entries — the crawl continues;
     // skipped URLs + decisions are recorded as crawl bookkeeping (which also
@@ -1688,7 +1713,6 @@ async function processKickoffSitemapJob(job: NuQJob<ScrapeJobKickoffSitemap>) {
 
       const jobPriority = await getJobPriority({
         team_id: job.data.team_id,
-        org_id: await orgIdForJob(sc.internalOptions?.orgId, job.data.team_id),
         basePriority: 21,
       });
 

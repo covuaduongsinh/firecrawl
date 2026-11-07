@@ -114,6 +114,26 @@ describe("operational Bigtable stores", () => {
     });
   });
 
+  it("records a ZDR agent run's retention on its job access row", async () => {
+    const expiresAt = new Date("2026-09-16T12:00:00.000Z");
+    await writeApiJobAccess({
+      id: JOB_ID,
+      teamId: "team-id",
+      kind: "agent",
+      expiresAt,
+      zeroDataRetention: true,
+      zeroDataRetentionMinutes: 15,
+    });
+
+    expect(writtenValue()).toEqual({
+      version: 1,
+      teamId: "team-id",
+      kind: "agent",
+      expiresAtMs: expiresAt.getTime(),
+      zeroDataRetentionMinutes: 15,
+    });
+  });
+
   it("reads a job access row", async () => {
     getRows.mockResolvedValueOnce([
       [
@@ -257,12 +277,41 @@ describe("operational Bigtable stores", () => {
       zeroDataRetention: false,
     });
     expect(mutate.mock.calls[0][0][0].data.f.v.timestamp).toEqual(
-      new Date(completedAt.getTime() + 180_000),
+      new Date(completedAt.getTime() + 24 * 60 * 60 * 1000),
     );
     expect(spans).toContainEqual({
       name: "bigtable.feedback_job.write",
       options: { zeroDataRetention: false },
     });
+  });
+
+  it("keeps the row past a feedback window longer than the default retention", async () => {
+    const completedAt = new Date("2026-09-15T12:00:00.000Z");
+    const original = mutableConfig.FEEDBACK_MAX_AGE_SEC;
+    mutableConfig.FEEDBACK_MAX_AGE_SEC = 30 * 60 * 60; // 30 h, past the 24 h default
+    try {
+      await writeFeedbackJob({
+        jobId: JOB_ID,
+        requestId: REQUEST_ID,
+        teamId: "team-id",
+        endpoint: "scrape",
+        scrapeOptions: scrapeOptions.parse({}),
+        succeeded: true,
+        creditsBilled: 1,
+        zeroDataRetention: false,
+        completedAt,
+      });
+    } finally {
+      mutableConfig.FEEDBACK_MAX_AGE_SEC = original;
+    }
+
+    expect(writtenValue()).toMatchObject({
+      feedbackDeadlineMs: completedAt.getTime() + 30 * 60 * 60 * 1000,
+    });
+    // window + one hour of margin, not the flat 24 h
+    expect(mutate.mock.calls[0][0][0].data.f.v.timestamp).toEqual(
+      new Date(completedAt.getTime() + 31 * 60 * 60 * 1000),
+    );
   });
 
   it("uses the search-specific feedback window", async () => {

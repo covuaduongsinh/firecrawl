@@ -246,7 +246,7 @@ impl Client {
     async fn get_crawl_status_next(&self, next: &str) -> Result<CrawlJob, FirecrawlError> {
         let response = self
             .client
-            .get(next)
+            .get(self.pin_to_api_origin(next)?)
             .headers(self.prepare_headers(None))
             .send()
             .await
@@ -491,6 +491,28 @@ mod tests {
         mock.assert();
     }
 
+    #[test]
+    fn test_crawl_scrape_options_send_json_options_as_json_format() {
+        let options = CrawlOptions {
+            scrape_options: Some(ScrapeOptions {
+                formats: Some(vec![crate::Format::Json]),
+                json_options: Some(crate::JsonOptions {
+                    prompt: Some("Extract the title".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let payload = serde_json::to_value(options).unwrap();
+        assert_eq!(
+            payload["scrapeOptions"]["formats"],
+            json!([{ "type": "json", "prompt": "Extract the title" }])
+        );
+        assert!(payload["scrapeOptions"].get("jsonOptions").is_none());
+    }
+
     #[tokio::test]
     async fn test_get_crawl_status_with_mock() {
         let mut server = mockito::Server::new_async().await;
@@ -680,5 +702,68 @@ mod tests {
         assert_eq!(result.data.len(), 1);
         start_mock.assert();
         status_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_crawl_status_pins_next_to_api_origin() {
+        let mut server = mockito::Server::new_async().await;
+        let mut other = mockito::Server::new_async().await;
+        let foreign = other
+            .mock("GET", Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let client = Client::new_selfhosted(server.url(), Some("test_key")).unwrap();
+        let path = "/v2/crawl/crawl-123?skip=1";
+        let mut nexts = vec![format!("{}{}", server.url(), path)];
+        nexts.extend(crate::client::foreign_next_urls(
+            &server.url(),
+            &other.url(),
+            path,
+        ));
+
+        for next in nexts {
+            let first = server
+                .mock("GET", "/v2/crawl/crawl-123")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({
+                        "status": "completed",
+                        "total": 2,
+                        "completed": 2,
+                        "creditsUsed": 2,
+                        "next": next,
+                        "data": [{ "markdown": "# Page 1" }]
+                    })
+                    .to_string(),
+                )
+                .create_async()
+                .await;
+            let page = server
+                .mock("GET", path)
+                .match_header("authorization", "Bearer test_key")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({
+                        "status": "completed",
+                        "total": 2,
+                        "completed": 2,
+                        "creditsUsed": 2,
+                        "data": [{ "markdown": "# Page 2" }]
+                    })
+                    .to_string(),
+                )
+                .create_async()
+                .await;
+
+            let status = client.get_crawl_status("crawl-123").await.unwrap();
+
+            assert_eq!(status.data.len(), 2, "next = {}", next);
+            first.assert_async().await;
+            page.assert_async().await;
+        }
+        foreign.assert_async().await;
     }
 }

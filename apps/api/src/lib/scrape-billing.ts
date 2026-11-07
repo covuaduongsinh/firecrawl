@@ -68,7 +68,7 @@ export function calculateThreatScanCredits(
  * chunk it attempted and fails open on a chunk it could not classify
  * (verdict "none"): a scan that left any chunk unscanned does not bill. A
  * detection is a verdict for the whole page even if a concurrent chunk failed,
- * since it blocked the extraction.
+ * since it blocked the scrape.
  */
 function promptInjectionGuardGaveVerdict(
   costTrackingJSON: ReturnType<typeof CostTracking.prototype.toJSON>,
@@ -153,15 +153,13 @@ export async function calculateCreditsToBeBilled(
     return creditsToBeBilled + threatScanCredits;
   }
 
+  // An Exchange access is priced by its provider in place of the base
+  // credit; format surcharges (json, question, ...) still apply on top.
   const exchangeCredits = getExchangeSuccessCredits({
     exchange,
     statusCode: document.metadata?.statusCode,
   });
-  if (exchangeCredits !== null) {
-    return exchangeCredits + threatScanCredits;
-  }
-
-  let creditsToBeBilled = 1; // Assuming 1 credit per document
+  let creditsToBeBilled = exchangeCredits ?? 1;
 
   if (options.lockdown) {
     creditsToBeBilled += 4;
@@ -180,13 +178,6 @@ export async function calculateCreditsToBeBilled(
     creditsToBeBilled += jsonCostBonus;
   }
 
-  if (
-    hasFormatOfType(options.formats, "json")?.checkPromptInjection &&
-    promptInjectionGuardGaveVerdict(costTrackingJSON)
-  ) {
-    creditsToBeBilled += 4;
-  }
-
   if (hasFormatOfType(options.formats, "deterministicJson")) {
     // 10 when this run generated the extractor script, 3 when it reused a
     // cached one. The codegen call is tagged in deterministicJson/llm/client.ts.
@@ -199,10 +190,19 @@ export async function calculateCreditsToBeBilled(
   }
 
   if (
+    options.checkPromptInjection &&
+    promptInjectionGuardGaveVerdict(costTrackingJSON)
+  ) {
+    creditsToBeBilled += 4;
+  }
+
+  if (
     internalOptions.v1Agent?.model === "fire-1" ||
     internalOptions.v1JSONAgent?.model?.toLowerCase() === "fire-1"
   ) {
-    creditsToBeBilled = Math.ceil((costTrackingJSON.totalCost ?? 1) * 1800);
+    creditsToBeBilled =
+      (exchangeCredits ?? 0) +
+      Math.ceil((costTrackingJSON.totalCost ?? 1) * 1800);
   }
 
   const hasQuestionFormat =
@@ -216,11 +216,16 @@ export async function calculateCreditsToBeBilled(
     creditsToBeBilled += 4;
   }
 
-  if (hasFormatOfType(options.formats, "audio")) {
+  // Not billed when zero data retention refuses them (transformers/audio.ts,
+  // video.ts). Lockdown skips the fetch before that check and keeps the surcharge.
+  const mediaFormatsRefused =
+    !!internalOptions.zeroDataRetention && !options.lockdown;
+
+  if (hasFormatOfType(options.formats, "audio") && !mediaFormatsRefused) {
     creditsToBeBilled += 4;
   }
 
-  if (hasFormatOfType(options.formats, "video")) {
+  if (hasFormatOfType(options.formats, "video") && !mediaFormatsRefused) {
     creditsToBeBilled += 4;
   }
 
@@ -258,7 +263,10 @@ export async function calculateCreditsToBeBilled(
     document.metadata?.url,
     document.metadata?.sourceURL,
   ].filter((u): u is string => !!u);
-  if (urlsToCheck.some(u => isUrlBlocked(u, null) && !isUrlBlocked(u, flags))) {
+  if (
+    exchangeCredits === null &&
+    urlsToCheck.some(u => isUrlBlocked(u, null) && !isUrlBlocked(u, flags))
+  ) {
     creditsToBeBilled += unblockedDomainCostBonus;
   }
 

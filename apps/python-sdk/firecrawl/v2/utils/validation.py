@@ -537,7 +537,6 @@ def prepare_scrape_options(options: Optional[ScrapeOptions]) -> Optional[Dict[st
     default_values = {
         "only_main_content": True,
         "mobile": False,
-        "skip_tls_verification": True,
         "remove_base64_images": True,
         "fast_mode": False,
         "block_ads": True,
@@ -570,6 +569,7 @@ def prepare_scrape_options(options: Optional[ScrapeOptions]) -> Optional[Dict[st
         "max_age": "maxAge",
         "min_age": "minAge",
         "redact_pii": "redactPII",
+        "check_prompt_injection": "checkPromptInjection",
         "threat_protection": "threatProtection",
         "audit_metadata": "auditMetadata",
     }

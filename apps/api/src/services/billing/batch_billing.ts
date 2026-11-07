@@ -186,7 +186,12 @@ async function refundRequestTrackedCredits(
         ...toAutumnBillingProperties(group.billing),
         apiKeyId: group.api_key_id,
       },
-      featureId: featureIdForBillingEndpoint(group.billing.endpoint),
+      featureId: group.billing.hostedMcp
+        ? await autumnService.hostedMcpFeatureId(
+            group.team_id,
+            featureIdForBillingEndpoint(group.billing.endpoint),
+          )
+        : featureIdForBillingEndpoint(group.billing.endpoint),
     });
   } catch (error) {
     logger.warn("Failed to refund Autumn request-tracked credits", {
@@ -287,7 +292,7 @@ export async function processBillingBatch() {
       } else {
         orgId = op.org_id;
       }
-      const key = `${op.team_id}:${orgId}:${billing.endpoint}:${op.is_extract}:${op.api_key_id}`;
+      const key = `${op.team_id}:${orgId}:${billing.endpoint}:${billing.hostedMcp === true}:${op.is_extract}:${op.api_key_id}`;
 
       if (!groupedOperations.has(key)) {
         groupedOperations.set(key, {
@@ -412,9 +417,15 @@ export function startBillingBatchProcessing() {
 
   logger.info("🔄 Starting periodic billing batch processing");
   batchInterval = setInterval(async () => {
-    const queueLength = await getRedisConnection().llen(BATCH_KEY);
-    logger.info(`Checking billing batch queue (${queueLength} items pending)`);
-    await processBillingBatch();
+    try {
+      const queueLength = await getRedisConnection().llen(BATCH_KEY);
+      logger.info(
+        `Checking billing batch queue (${queueLength} items pending)`,
+      );
+      await processBillingBatch();
+    } catch (error) {
+      logger.error("Error in periodic billing batch processing", { error });
+    }
   }, BATCH_TIMEOUT);
 
   // Unref to not keep process alive

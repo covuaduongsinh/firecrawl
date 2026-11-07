@@ -19,8 +19,15 @@ const mocks = vi.hoisted(() => {
     refund: vi.fn(),
     billAdd: vi.fn(),
     report: vi.fn(),
+    initCredits: vi.fn(),
+    recordCredits: vi.fn(),
   };
 });
+vi.mock("../../lib/request-credits-store", () => ({
+  AGENT_REQUEST_CREDITS_SHARDS: 8,
+  initializeRequestCredits: mocks.initCredits,
+  recordRequestCredits: mocks.recordCredits,
+}));
 vi.mock("../../config", () => ({ config: mocks.config }));
 vi.mock("../rate-limiter", () => ({ redisRateLimitClient: mocks.redis }));
 vi.mock("./client", () => ({ exchangeRequest: mocks.request }));
@@ -34,9 +41,9 @@ vi.mock("../../lib/exchange", () => ({
 vi.mock("../autumn/autumn.service", () => ({
   autumnService: {
     lockCredits: mocks.lock,
+    hostedMcpFeatureId: async () => "MCP_CREDITS",
     finalizeCreditsLock: mocks.finalize,
     refundCredits: mocks.refund,
-    isRoutedThroughFirebill: async () => false,
   },
   featureIdForBillingEndpoint: () => "credits",
 }));
@@ -62,6 +69,7 @@ const run = (overrides: Record<string, unknown> = {}) =>
     requestId: "request-1",
     scrapeId: "scrape-1",
     timeoutMs: 50000,
+    rateLimitMultiplier: 1,
     ...overrides,
   });
 const executions = () =>
@@ -85,6 +93,8 @@ beforeEach(() => {
   mocks.refund.mockResolvedValue(undefined);
   mocks.billAdd.mockResolvedValue({});
   mocks.report.mockResolvedValue(true);
+  mocks.initCredits.mockResolvedValue(true);
+  mocks.recordCredits.mockResolvedValue(true);
   exchangeAnswers(answer);
 });
 
@@ -118,7 +128,7 @@ it("quotes, reserves, executes within budget, settles actual usage, records once
     expect.objectContaining({
       credits: 3,
       org_id: "org",
-      autumnTrackInRequest: true,
+      autumnTrackInRequest: false,
     }),
     expect.objectContaining({
       jobId: expect.stringMatching(/^alexandria-bill-/),
@@ -138,6 +148,65 @@ it("quotes, reserves, executes within budget, settles actual usage, records once
   expect(executions()).toHaveLength(1);
   expect(mocks.finalize).toHaveBeenCalledTimes(1);
   expect(mocks.billAdd).toHaveBeenCalledTimes(1);
+});
+
+it("holds and settles a hosted MCP call's whole budget on MCP credits", async () => {
+  expect(await run({ hostedMcp: true })).toMatchObject({
+    status: 200,
+    executed: true,
+  });
+  expect(mocks.lock).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ value: 5, featureId: "MCP_CREDITS" }),
+  );
+  expect(mocks.finalize).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({
+      overrideValue: 3,
+      heldValue: 5,
+      featureId: "MCP_CREDITS",
+    }),
+  );
+  expect(mocks.billAdd).toHaveBeenCalledWith(
+    "bill_team",
+    expect.objectContaining({
+      credits: 3,
+      billing: expect.objectContaining({ hostedMcp: true }),
+    }),
+    expect.anything(),
+  );
+});
+
+it("holds a hosted MCP call MCP credits refuse on the team's own credits", async () => {
+  mocks.lock
+    .mockResolvedValueOnce({ status: "denied" })
+    .mockResolvedValueOnce({ status: "locked", lockId: "held" });
+  mocks.billAdd.mockRejectedValue(new Error("queue down"));
+
+  expect((await run({ hostedMcp: true })).status).toBe(200);
+  expect(mocks.lock.mock.calls.map(([hold]) => hold.featureId)).toEqual([
+    "MCP_CREDITS",
+    "credits",
+  ]);
+  expect(mocks.finalize).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ featureId: "credits" }),
+  );
+  expect(mocks.billAdd).toHaveBeenCalledWith(
+    "bill_team",
+    expect.objectContaining({
+      billing: expect.not.objectContaining({ hostedMcp: true }),
+    }),
+    expect.anything(),
+  );
+  expect(mocks.refund).not.toHaveBeenCalled();
+});
+
+it("reports billing unavailable when the team-credit fallback hold can't be placed", async () => {
+  mocks.lock
+    .mockResolvedValueOnce({ status: "denied", reason: "out_of_credits" })
+    .mockResolvedValueOnce({ status: "denied", reason: "gate_unavailable" });
+
+  const refused = await run({ hostedMcp: true });
+  expect(refused).toMatchObject({ status: 503, executed: false });
+  expect(executions()).toHaveLength(0);
 });
 
 it("refuses a different payload under the same x-request-id", async () => {
@@ -260,13 +329,11 @@ it("returns the answer but records nothing when the settle does not land", async
   expect(mocks.report).not.toHaveBeenCalled();
 });
 
-it("refunds the direct-Autumn charge and leaves the Exchange usage pending when the ledger enqueue fails", async () => {
+it("keeps the charge and leaves the Exchange usage pending when the ledger enqueue fails", async () => {
   mocks.billAdd.mockRejectedValue(new Error("queue down"));
   expect((await run()).status).toBe(200);
   expect(mocks.billAdd).toHaveBeenCalledTimes(3);
-  expect(mocks.refund).toHaveBeenCalledWith(
-    expect.objectContaining({ teamId: "team", orgId: "org", value: 3 }),
-  );
+  expect(mocks.refund).not.toHaveBeenCalled();
   expect(mocks.report).not.toHaveBeenCalled();
 });
 
@@ -337,7 +404,7 @@ it.each([
     options: { requestId: "source" },
   },
   { provider: "other", capability: "bash", options: { requestId: "source" } },
-])("does not forward credentials for other calls: %j", async other => {
+])("forwards credentials with execution for mixed calls: %j", async other => {
   exchangeAnswers({
     success: true,
     creditsCost: 0,
@@ -350,11 +417,11 @@ it.each([
   expect(
     await run({ calls: [call, other], resultAuthorization: "Bearer caller" }),
   ).toMatchObject({ status: 200, executed: true });
-  expect(executions()[0][0].resultAuthorization).toBeUndefined();
+  expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
 });
 
 it.each([123, null, false, {}, []])(
-  "never forwards credentials for a non-string Bash requestId: %j",
+  "forwards credentials with execution for a non-string Bash requestId: %j",
   async requestId => {
     const bash = {
       provider: "firecrawl",
@@ -369,7 +436,7 @@ it.each([123, null, false, {}, []])(
       await run({ calls: [call, bash], resultAuthorization: "Bearer caller" }),
     ).toMatchObject({ status: 400 });
     expect(executions()).toHaveLength(1);
-    expect(executions()[0][0].resultAuthorization).toBeUndefined();
+    expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
   },
 );
 
@@ -493,4 +560,259 @@ it("does not derive terms credential identity from numeric API-key IDs", async (
     if (!execution) throw new Error("Expected a provider execution");
     expect(execution[0].termsIdentity).toBeUndefined();
   }
+});
+
+const sqlCall = {
+  provider: "firecrawl",
+  capability: "sql",
+  options: { query: "SHOW TABLES IN apollo LIMIT 10" },
+};
+it("forwards standalone SQL credentials only to execution without retaining them", async () => {
+  exchangeAnswers({
+    success: true,
+    creditsCost: 0,
+    results: [
+      { ...sqlCall, creditsCost: 0, data: { kind: "tables", items: [] } },
+    ],
+  });
+  expect(
+    await run({ calls: [sqlCall], resultAuthorization: "Bearer caller" }),
+  ).toMatchObject({ status: 200, executed: true });
+  expect(executions()).toHaveLength(1);
+  expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
+  expect(
+    mocks.request.mock.calls
+      .filter(([arg]) => arg.path !== "/v1/retrieve")
+      .every(([arg]) => arg.resultAuthorization === undefined),
+  ).toBe(true);
+  expect([...mocks.store.values()].join("")).not.toContain("Bearer caller");
+});
+it.each([
+  { name: "SQL first", calls: [sqlCall, call] },
+  { name: "SQL last", calls: [call, sqlCall] },
+  { name: "two SQL calls", calls: [sqlCall, sqlCall] },
+])("rejects batched SQL before side effects: $name", async ({ calls }) => {
+  expect(
+    await run({ calls, resultAuthorization: "Bearer caller" }),
+  ).toMatchObject({ status: 400, executed: false });
+  expect(mocks.request).not.toHaveBeenCalled();
+  expect(mocks.authorize).not.toHaveBeenCalled();
+  expect(mocks.lock).not.toHaveBeenCalled();
+  expect(mocks.store.size).toBe(0);
+});
+it("forwards credentials with execution for another provider's sql capability", async () => {
+  const other = { ...sqlCall, provider: "other" };
+  exchangeAnswers({
+    success: true,
+    creditsCost: 0,
+    results: [{ ...other, creditsCost: 0, data: {} }],
+  });
+  expect(
+    await run({ calls: [other], resultAuthorization: "Bearer caller" }),
+  ).toMatchObject({ status: 200, executed: true });
+  expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
+});
+
+const enrichmentCall = {
+  provider: "firecrawl",
+  capability: "enrich",
+  options: { url: "https://ca.linkedin.com/in/example", format: "json" },
+};
+it("forwards standalone enrichment credentials only to execution without retaining them", async () => {
+  exchangeAnswers({
+    success: true,
+    creditsCost: 0,
+    results: [
+      {
+        ...enrichmentCall,
+        creditsCost: 0,
+        data: { status: "disabled", steps: [] },
+      },
+    ],
+  });
+  expect(
+    await run({
+      calls: [enrichmentCall],
+      resultAuthorization: "Bearer caller",
+    }),
+  ).toMatchObject({ status: 200, executed: true });
+  expect(executions()).toHaveLength(1);
+  expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
+  expect(
+    mocks.request.mock.calls
+      .filter(([arg]) => arg.path !== "/v1/retrieve")
+      .every(([arg]) => arg.resultAuthorization === undefined),
+  ).toBe(true);
+  expect([...mocks.store.values()].join("")).not.toContain("Bearer caller");
+});
+it.each([
+  { name: "enrichment first", calls: [enrichmentCall, call] },
+  { name: "enrichment last", calls: [call, enrichmentCall] },
+  { name: "two enrichment calls", calls: [enrichmentCall, enrichmentCall] },
+])(
+  "rejects batched enrichment before side effects: $name",
+  async ({ calls }) => {
+    expect(
+      await run({ calls, resultAuthorization: "Bearer caller" }),
+    ).toMatchObject({ status: 400, executed: false });
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.authorize).not.toHaveBeenCalled();
+    expect(mocks.lock).not.toHaveBeenCalled();
+    expect(mocks.store.size).toBe(0);
+  },
+);
+it("forwards credentials with execution for another provider's enrich capability", async () => {
+  const other = { ...enrichmentCall, provider: "other" };
+  exchangeAnswers({
+    success: true,
+    creditsCost: 0,
+    results: [{ ...other, creditsCost: 0, data: {} }],
+  });
+  expect(
+    await run({ calls: [other], resultAuthorization: "Bearer caller" }),
+  ).toMatchObject({ status: 200, executed: true });
+  expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
+});
+
+it("forwards credentials with execution for any provider, never to quote or authorization, and never retains them", async () => {
+  const plain = {
+    provider: "fred",
+    capability: "series/observations",
+    options: { series_id: "GDP" },
+  };
+  exchangeAnswers({
+    success: true,
+    creditsCost: 0,
+    results: [{ ...plain, creditsCost: 0, data: {} }],
+  });
+  expect(
+    await run({ calls: [plain], resultAuthorization: "Bearer caller" }),
+  ).toMatchObject({ status: 200, executed: true });
+  expect(executions()).toHaveLength(1);
+  expect(executions()[0][0].resultAuthorization).toBe("Bearer caller");
+  expect(
+    mocks.request.mock.calls
+      .filter(([arg]) => arg.path !== "/v1/retrieve")
+      .every(([arg]) => arg.resultAuthorization === undefined),
+  ).toBe(true);
+  expect([...mocks.store.values()].join("")).not.toContain("Bearer caller");
+});
+
+it("sends no credentials when the caller supplied none", async () => {
+  exchangeAnswers({
+    success: true,
+    creditsCost: 0,
+    results: [{ ...call, creditsCost: 0, data: {} }],
+  });
+  expect(await run({ calls: [call] })).toMatchObject({
+    status: 200,
+    executed: true,
+  });
+  expect(executions()[0][0].resultAuthorization).toBeUndefined();
+});
+
+it("forwards zero data retention to quote and execution and keeps no response", async () => {
+  expect(await run({ zeroDataRetention: true })).toEqual({
+    status: 200,
+    body: answer,
+    executed: true,
+    scrapeId: "scrape-1",
+  });
+  const forwarded = mocks.request.mock.calls.filter(
+    ([r]) => r.path.endsWith("/quote") || r.path === "/v1/retrieve",
+  );
+  expect(forwarded).toHaveLength(2);
+  for (const [request] of forwarded)
+    expect(request.zeroDataRetention).toBe(true);
+  const [stored] = [...mocks.store.values()].map(raw => JSON.parse(raw));
+  expect(stored).toMatchObject({ phase: "done", responseWithheld: true });
+  expect(stored).not.toHaveProperty("response");
+
+  const replay = await run({ zeroDataRetention: true, scrapeId: "scrape-2" });
+  expect(replay).toMatchObject({ status: 409, executed: false });
+  expect(replay.body).toEqual(
+    expect.objectContaining({ code: "response_not_retained" }),
+  );
+  expect(executions()).toHaveLength(1);
+});
+
+it("keeps and replays the response without zero data retention", async () => {
+  await run();
+  expect(
+    mocks.request.mock.calls.every(([r]) => r.zeroDataRetention === undefined),
+  ).toBe(true);
+  const [stored] = [...mocks.store.values()].map(raw => JSON.parse(raw));
+  expect(stored.response).toEqual({ status: 200, body: answer });
+  expect(stored).not.toHaveProperty("responseWithheld");
+  expect(await run()).toMatchObject({
+    status: 200,
+    body: answer,
+    executed: false,
+  });
+});
+
+it("refuses the same x-request-id with a different zero data retention setting", async () => {
+  await run();
+  const other = await run({ zeroDataRetention: true });
+  expect(other.status).toBe(409);
+  expect(other.body).toEqual(
+    expect.objectContaining({ code: "duplicate_request" }),
+  );
+  expect(executions()).toHaveLength(1);
+});
+
+it("records an agent call's charge on the agent run, once, at Exchange's price", async () => {
+  await run({ agentRequestId: "agent-run", zeroDataRetention: true });
+  expect(mocks.initCredits).not.toHaveBeenCalled();
+  expect(mocks.recordCredits).toHaveBeenCalledTimes(1);
+  expect(mocks.recordCredits).toHaveBeenCalledWith({
+    requestId: "agent-run",
+    jobId: expect.stringMatching(/^alexandria:/),
+    credits: 3,
+  });
+
+  await run({ agentRequestId: "agent-run", zeroDataRetention: true });
+  expect(mocks.recordCredits).toHaveBeenCalledTimes(1);
+});
+
+it("records nothing on the agent run when nothing was charged", async () => {
+  await run({ agentRequestId: "agent-run", bypassBilling: true });
+  mocks.store.clear();
+  mocks.finalize.mockResolvedValueOnce(false);
+  await run({ agentRequestId: "agent-run" });
+  expect(mocks.recordCredits).not.toHaveBeenCalled();
+});
+
+it("records an agent call's charge when the ledger enqueue fails, since the charge stands", async () => {
+  mocks.billAdd.mockRejectedValue(new Error("queue down"));
+  await run({ agentRequestId: "agent-run" });
+  expect(mocks.recordCredits).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ requestId: "agent-run", credits: 3 }),
+  );
+});
+
+it("still answers when the agent run's credits cannot be recorded", async () => {
+  mocks.recordCredits.mockRejectedValue(new Error("bigtable down"));
+  expect(await run({ agentRequestId: "agent-run" })).toMatchObject({
+    status: 200,
+    executed: true,
+  });
+  expect(mocks.billAdd).toHaveBeenCalledTimes(1);
+});
+
+it("creates the agent run's credit row only when it is missing", async () => {
+  mocks.recordCredits.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  await run({ agentRequestId: "agent-run" });
+  expect(mocks.initCredits).toHaveBeenCalledWith("agent-run", 8);
+  expect(mocks.recordCredits).toHaveBeenCalledTimes(2);
+});
+
+it("does not retry the write when the credit store is unavailable", async () => {
+  mocks.recordCredits.mockResolvedValue(false);
+  mocks.initCredits.mockResolvedValue(false);
+  expect(await run({ agentRequestId: "agent-run" })).toMatchObject({
+    status: 200,
+    executed: true,
+  });
+  expect(mocks.recordCredits).toHaveBeenCalledTimes(1);
 });
