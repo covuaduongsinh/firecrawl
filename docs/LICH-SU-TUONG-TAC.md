@@ -6,6 +6,27 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-07 — Đồng bộ 435 commit từ Upstream vào Local và GitHub (Origin)
+
+**Yêu cầu**: Lên kế hoạch `/plan` và triển khai cập nhật, đồng bộ các thay đổi từ repository gốc (`upstream/main`) vào repository local (`main`) và GitHub (`origin/main`), đồng thời quy định từ nay mọi kế hoạch luôn được lưu tại thư mục `docs/plans/`.
+
+**Quyết định & Nghiên cứu Upstream**:
+- **Nghiên cứu việc Upstream gỡ bỏ `apps/ui/ingestion-ui`**: Tại commit `244f83bdd`, upstream xóa template mẫu cũ vì họ không dùng và để loại bỏ các cảnh báo lỗ hổng bảo mật. Thay vào đó, Firecrawl chuyển hướng Web UI sang SaaS Cloud (`firecrawl.dev/app`), phát triển `firecrawl-cli` và cung cấp bộ `skills/` chuẩn cho AI agents (Cursor, Claude Code, Antigravity).
+- **Quyết định**: Giữ nguyên vẹn 100% mã nguồn `apps/ui/ingestion-ui` trên fork của chúng ta (vì đã được nâng cấp thành công cụ trích xuất mạnh mẽ độc lập); từ nay thư mục này hoàn toàn độc lập, không còn lo ngại xung đột từ upstream.
+- **Quy ước kế hoạch**: Kế hoạch đồng bộ được lưu tại `docs/plans/2026-11-07-sync-upstream-firecrawl-plan.md`. Mọi kế hoạch trong tương lai cũng sẽ luôn được ghi vào `docs/plans/`.
+
+**Đã làm**:
+- Commit tài liệu và ghi chú quy ước kế hoạch (`423cd5532`).
+- Tạo nhánh sao lưu an toàn `backup/pre-sync-upstream-main`.
+- Thực hiện merge 435 commit từ `upstream/main` vào `main` (commit merge `601db8868`).
+- Giải quyết xung đột: giữ lại toàn bộ `apps/ui/ingestion-ui/`, hợp nhất cấu hình `.gitignore` (bao gồm `tmp/` từ upstream và các rule local tools).
+- Đẩy nhánh `main` đã merge lên GitHub remote `origin/main` thành công.
+- Lưu trữ đầy đủ kế hoạch và cập nhật nhật ký tương tác.
+
+**Bước kế tiếp**: Sẵn sàng khai thác các tính năng mới của Core API v2, Playwright service 1.65.0 và hệ thống Agent Skills tại `skills/`.
+
+---
+
 ## 2026-09-30 — Khởi tạo bộ tài liệu (pha 1)
 
 **Yêu cầu**: tạo/cập nhật các file `.md` (agents, claude, readme, skills, tech, memory...) để thống kê, giới thiệu, mô tả thuật toán và lưu lịch sử của mọi module, làm cơ sở rà soát, xây thêm module mới và nhân bản phần mềm.
