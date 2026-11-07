@@ -6,6 +6,32 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-07 — Khắc phục lỗi lấy dữ liệu "Not logged in · Please run /login" từ Claude Code CLI
+
+**Yêu cầu**: Sửa lỗi cào tài liệu từ Nocobase khi toàn bộ các bài viết kết quả chỉ có dung lượng ~1KB và chứa nội dung `Not logged in · Please run /login`.
+
+**Nguyên nhân gốc rễ đã xác định**:
+1. Phiên OAuth của `claude` CLI trên VPS đã hết hạn (`accessToken: ""`), khiến `claude` thoát với mã lỗi 1 và in thông báo `Not logged in · Please run /login`.
+2. Lỗ hổng trong cầu nối Server Bridge (`bridge.js` và `bridge/middleware.ts`): do điều kiện `if (code !== 0 && !stdout.trim())` chỉ báo lỗi khi `stdout` rỗng, nên khi Claude in chuỗi lỗi vào `stdout`, Bridge đã hiểu nhầm đây là nội dung dịch thành công và trả về `HTTP 200 { success: true, rawOutput: "Not logged in · Please run /login" }`.
+3. Endpoint `/api/cli/status` chỉ kiểm tra sự tồn tại của tệp nhị phân trên đĩa chứ không kiểm tra trạng thái xác thực thực tế, gây hiểu nhầm với badge `✓ Claude Code CLI Sẵn sàng`.
+4. Trong khi đó, **Google Antigravity / Gemini CLI (`agy`)** trên VPS đã được xác thực qua `/root/.gemini` và hoạt động hoàn hảo 100%.
+
+**Đã làm**:
+- Kế hoạch chi tiết lưu tại `docs/plans/2026-11-07-fix-cli-auth-validation-and-extractor-plan.md`.
+- Sửa Server Bridge (`bridge/middleware.ts` và `/var/www/firecrawl-ui/bridge.js` trên VPS):
+  + Kiểm tra xác thực thực tế trong `/api/cli/status`: nếu chưa có token hợp lệ thì trả về `available: false` kèm lý do `Chưa đăng nhập`.
+  + Bắt buộc trả về HTTP 401 khi phát hiện lỗi xác thực CLI, không bao giờ trả về HTTP 200 cho chuỗi thông báo lỗi.
+- Sửa Frontend (`aiEngines.ts`, `AIEngineSettings.tsx`):
+  + Bổ sung kiểm duyệt trong `parseAIOutputSafe` và `executeDirectAIExtract` để từ chối các chuỗi lỗi xác thực.
+  + Hiển thị badge cảnh báo hổ phách `⚠️ Claude CLI chưa đăng nhập - Hãy chọn Antigravity hoặc nhập Key`.
+- Build và triển khai bản cập nhật lên VPS (`index-_Vtdty6-.js`), khởi động lại container `ui` và `ui-bridge`.
+- Kiểm tra xác minh:
+  + `/api/cli/status` báo chính xác `claude: { available: false, authenticated: false }` và `antigravity: { available: true, authenticated: true }`.
+  + `/api/cli/extract` với Claude trả về đúng HTTP 401 Unauthorized kèm hướng dẫn.
+  + `/api/cli/extract` với Google Antigravity dịch tiếng Việt chuẩn xác và ổn định.
+
+---
+
 ## 2026-11-07 — Triển khai cập nhật lên VPS qua Dokploy & SSH
 
 **Yêu cầu**: Cập nhật bản build mới nhất của phần mềm lên VPS `217.15.160.118` (domain `https://firecrawl.dsc.edu.vn`) qua Dokploy (`https://dokploy.dsc.edu.vn`) và SSH.
