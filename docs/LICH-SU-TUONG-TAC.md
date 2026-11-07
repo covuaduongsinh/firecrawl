@@ -6,6 +6,26 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-07 — Kích hoạt gói thuê bao Claude Max (Claude Code CLI) trên VPS
+
+**Yêu cầu**: Người dùng muốn sử dụng gói thuê bao Claude Code thay vì trả tiền API token và gặp lỗi "Chưa có Key / Chưa tìm thấy claude.exe".
+
+**Phát hiện**:
+- Người dùng đã sở hữu tài khoản Claude Max (`duongsinhchess@gmail.com`, bậc `default_claude_max_5x`) đã được xác thực trên máy local tại `C:\Users\duongsinh\.claude\.credentials.json`.
+- Trên VPS, container `ui-bridge` trước đây chưa mount thư mục `/root/.claude/` nên không đọc được OAuth token của gói thuê bao.
+
+**Đã làm**:
+- Đồng bộ token xác thực Claude Max từ local lên VPS `/root/.claude/.credentials.json`.
+- Cập nhật file compose của Dokploy (`/etc/dokploy/compose/compose-navigate-online-bus-tlk6tz/code/docker-compose.yml`), bổ sung mount `- /root/.claude:/root/.claude` cho container `ui-bridge`.
+- Tái tạo container `ui-bridge`.
+- Kiểm tra xác minh:
+  + `claude auth status` trên VPS: `loggedIn: true, authMethod: "claude.ai", subscriptionType: "max"`.
+  + Endpoint `/api/cli/status` trả về: `claude: { available: true, authenticated: true, reason: "Sẵn sàng" }`.
+  + Endpoint `/api/cli/extract` test dịch thực tế với Claude CLI trả về: `"Gói đăng ký Claude Max đang hoạt động hoàn hảo."` (HTTP 200).
+  + Web UI `https://firecrawl.dsc.edu.vn` sẵn sàng sử dụng Claude Max không cần nhập API Key.
+
+---
+
 ## 2026-11-07 — Khắc phục lỗi lấy dữ liệu "Not logged in · Please run /login" từ Claude Code CLI
 
 **Yêu cầu**: Sửa lỗi cào tài liệu từ Nocobase khi toàn bộ các bài viết kết quả chỉ có dung lượng ~1KB và chứa nội dung `Not logged in · Please run /login`.
