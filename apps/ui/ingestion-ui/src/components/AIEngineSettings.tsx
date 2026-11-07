@@ -257,7 +257,7 @@ export default function AIEngineSettings({
                   <Check className="w-3 h-3" /> Claude Code CLI Sẵn sàng
                 </>
               ) : (
-                "⚠️ Nhập Anthropic Key hoặc cài Claude CLI"
+                "⚠️ Claude CLI chưa đăng nhập - Hãy chọn Antigravity hoặc nhập Key"
               )}
             </span>
           )}

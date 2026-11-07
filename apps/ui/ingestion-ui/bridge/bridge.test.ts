@@ -51,6 +51,12 @@ describe("parseCliOutput", () => {
   it("báo lỗi khi CLI trả status ERROR", () => {
     expect(parseCliOutput('{"status":"ERROR","error":"quota"}')).toEqual({ ok: false, error: "quota" });
   });
+  it("từ chối thông báo chưa đăng nhập của CLI", () => {
+    expect(parseCliOutput("Not logged in · Please run /login")).toEqual({
+      ok: false,
+      error: "Not logged in · Please run /login",
+    });
+  });
 });
 
 describe("bridge middleware", () => {

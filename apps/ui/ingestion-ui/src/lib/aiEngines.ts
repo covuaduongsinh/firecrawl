@@ -130,7 +130,11 @@ export function parseAIOutputSafe(rawText: string): unknown {
       }
     }
 
-    // 4. Fallback: Nếu AI trả về văn bản dịch/markdown thuần tuý, đóng gói thành đối tượng có cấu trúc
+    // 4. Fallback: Nếu AI trả về văn bản dịch/markdown thuần tuý, kiểm tra tính hợp lệ
+    if (/(not logged in|please run \/login|failed to authenticate|oauth session expired)/i.test(clean)) {
+      throw new Error(`AI CLI chưa đăng nhập: ${clean}`);
+    }
+
     return {
       type: "document",
       markdown: clean,
@@ -403,6 +407,12 @@ IMPORTANT RULES:
     }
 
     const cliData = await cliRes.json();
+    if (!cliData.rawOutput || /(not logged in|please run \/login|failed to authenticate|oauth session expired)/i.test(cliData.rawOutput)) {
+      throw new HttpError(
+        401,
+        `Antigravity CLI trả về lỗi xác thực: ${cliData.rawOutput || "Không có dữ liệu phản hồi"}`
+      );
+    }
     return {
       extractedJson: parseAIOutputSafe(cliData.rawOutput),
       engineUsed: "Google Antigravity CLI (agy)",
@@ -463,6 +473,12 @@ IMPORTANT RULES:
     }
 
     const cliData = await cliRes.json();
+    if (!cliData.rawOutput || /(not logged in|please run \/login|failed to authenticate|oauth session expired)/i.test(cliData.rawOutput)) {
+      throw new HttpError(
+        401,
+        `Claude Code CLI chưa đăng nhập: ${cliData.rawOutput || "Vui lòng chuyển sang Google Antigravity hoặc nhập API Key."}`
+      );
+    }
     return {
       extractedJson: parseAIOutputSafe(cliData.rawOutput),
       engineUsed: "Claude Code CLI (claude)",

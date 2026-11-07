@@ -1,4 +1,7 @@
+import fs from "fs";
 import type { IncomingMessage, ServerResponse } from "http";
+import os from "os";
+import path from "path";
 import {
   buildCliInvocation,
   CliEngine,
@@ -149,6 +152,49 @@ async function handleFetchHtml(req: IncomingMessage, res: ServerResponse, timeou
   sendJson(res, 200, { success: true, html: page.html, finalUrl: page.finalUrl });
 }
 
+export function isClaudeAuthenticated(claudePath: string | null): boolean {
+  if (!claudePath) return false;
+  if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim().length > 0) return true;
+  const userHome = os.homedir();
+  const credPaths = [
+    path.join(userHome, ".claude", ".credentials.json"),
+    path.join(userHome, ".claude.json"),
+    "/root/.claude/.credentials.json",
+    "/root/.claude.json",
+  ];
+  for (const credPath of credPaths) {
+    try {
+      if (fs.existsSync(credPath)) {
+        const raw = fs.readFileSync(credPath, "utf8");
+        const json = JSON.parse(raw);
+        if (json?.claudeAiOauth?.accessToken && json.claudeAiOauth.accessToken.length > 0) {
+          return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export function isAntigravityAuthenticated(agyPath: string | null): boolean {
+  if (!agyPath) return false;
+  if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0) return true;
+  const userHome = os.homedir();
+  const localAppData = process.env.LOCALAPPDATA || "";
+  const credPaths = [
+    path.join(userHome, ".gemini", "oauth_creds.json"),
+    path.join(userHome, ".gemini", "credentials.json"),
+    path.join(localAppData, "agy", "oauth_creds.json"),
+    "/root/.gemini/oauth_creds.json",
+  ];
+  for (const credPath of credPaths) {
+    try {
+      if (fs.existsSync(credPath)) return true;
+    } catch {}
+  }
+  return fs.existsSync(path.join(userHome, ".gemini")) || fs.existsSync("/root/.gemini");
+}
+
 function defaultResolveCli(engine: CliEngine, prompt: string, model?: string): CliInvocation | null {
   const executable = findExecutable([engine === "claude" ? "claude" : "agy"]);
   return executable ? buildCliInvocation(engine, executable, prompt, model) : null;
@@ -195,10 +241,14 @@ async function handleCliExtract(
   if (result.kind === "spawn-error") {
     return sendJson(res, 500, { error: `Lỗi khởi chạy CLI (${invocation.executable}): ${result.message}` });
   }
-  if (result.code !== 0 && !result.stdout.trim()) {
-    return sendJson(res, 500, {
-      error: `CLI trả về mã lỗi ${result.code}: ${(result.stderr || result.stdout).slice(0, 2000)}`,
-    });
+  const combined = (result.stdout + "\n" + result.stderr).trim();
+  const isAuthError = /(not logged in|please run \/login|failed to authenticate|oauth session expired)/i.test(combined);
+
+  if (result.code !== 0 || isAuthError) {
+    const errorText = isAuthError
+      ? `CLI (${engine}) chưa được đăng nhập hoặc phiên đã hết hạn. Hãy chuyển sang Google Antigravity / Gemini hoặc nhập API Key trong Cài đặt AI Engine.`
+      : `CLI trả về mã lỗi ${result.code}: ${(result.stderr || result.stdout).slice(0, 2000)}`;
+    return sendJson(res, isAuthError ? 401 : 500, { error: errorText });
   }
 
   const parsed = parseCliOutput(result.stdout);
@@ -243,9 +293,11 @@ export function createBridgeMiddleware(options: BridgeOptions) {
       if (pathname === "/api/cli/status" && req.method === "GET") {
         const agy = findExecutable(["agy"]);
         const claude = findExecutable(["claude"]);
+        const agyAuth = isAntigravityAuthenticated(agy);
+        const claudeAuth = isClaudeAuthenticated(claude);
         return sendJson(res, 200, {
-          antigravity: { available: !!agy, path: agy },
-          claude: { available: !!claude, path: claude },
+          antigravity: { available: agyAuth, path: agy, authenticated: agyAuth },
+          claude: { available: claudeAuth, path: claude, authenticated: claudeAuth },
         });
       }
       if (pathname === "/api/proxy/fetch-html") {

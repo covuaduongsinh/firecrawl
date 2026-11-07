@@ -150,6 +150,9 @@ export function runCli(invocation: CliInvocation, timeoutMs: number): Promise<Cl
 /** Extracts the model's answer from the CLI output (JSON envelope or plain text). */
 export function parseCliOutput(stdout: string): { ok: true; text: string } | { ok: false; error: string } {
   const text = stdout.trim();
+  if (/(not logged in|please run \/login|failed to authenticate|oauth session expired)/i.test(text)) {
+    return { ok: false, error: text };
+  }
   try {
     const parsed = JSON.parse(text);
     if (parsed && typeof parsed === "object") {
