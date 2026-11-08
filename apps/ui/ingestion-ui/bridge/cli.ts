@@ -115,15 +115,21 @@ export function runCli(invocation: CliInvocation, timeoutMs: number): Promise<Cl
       resolve(result);
     };
 
+    const claudeToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const procEnv: Record<string, string | undefined> = {
+      ...process.env,
+      DISABLE_AUTOUPDATER: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    };
+    if (claudeToken) {
+      procEnv.CLAUDE_CODE_OAUTH_TOKEN = claudeToken;
+    }
+
     const proc = spawn(invocation.executable, invocation.args, {
       stdio: [invocation.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       shell: invocation.shell,
       windowsHide: true,
-      env: {
-        ...process.env,
-        DISABLE_AUTOUPDATER: "1",
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-      },
+      env: procEnv,
     });
 
     const timer = setTimeout(() => {

@@ -242,6 +242,11 @@ async function handleCliExtract(
   if (!engine) return sendJson(res, 400, { error: `Engine không hỗ trợ CLI: ${String(engineInput)}` });
   if (!prompt.trim()) return sendJson(res, 400, { error: "Thiếu prompt." });
 
+  const oauthToken = getClaudeOAuthToken();
+  if (oauthToken && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+  }
+
   let invocation: CliInvocation | null;
   try {
     invocation = options.resolveCli(engine, prompt, model);
