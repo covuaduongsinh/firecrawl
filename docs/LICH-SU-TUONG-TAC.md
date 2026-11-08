@@ -6,6 +6,29 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-08 — Triển khai Tab "Tìm Kiếm Web & Deep Research Studio" (Khai thác Upstream v1 Search)
+
+**Yêu cầu**: Triển khai ngay tính năng mới từ bản cập nhật upstream Firecrawl để khai thác năng lực tìm kiếm thông tin trên toàn cầu kết hợp AI tổng hợp báo cáo.
+
+**Đã làm**:
+1. Lập và lưu kế hoạch chi tiết tại: `docs/plans/2026-11-08-roadmap-upstream-features-plan.md`.
+2. Xây dựng module client `apps/ui/ingestion-ui/src/lib/searchClient.ts`:
+   - Kết nối trực tiếp endpoint `/v1/search` của Firecrawl Core API trên VPS.
+   - Hàm `searchWeb`: Cào dữ liệu Markdown sạch từ đa nguồn theo thuật toán Rank Fusion v1.
+   - Hàm `buildResearchPrompt`: Xây dựng prompt tổng hợp báo cáo nghiên cứu chuyên sâu (Deep Research) chuẩn Obsidian.
+   - Hàm `runDeepResearch`: Tự động gọi Claude Max (Token 1 năm) hoặc Antigravity CLI để tạo báo cáo tổng hợp.
+3. Viết 4 unit tests trong `searchClient.test.ts` (12/12 tests toàn bộ suite passed).
+4. Xây dựng component giao diện `apps/ui/ingestion-ui/src/components/SearchResearchStudio.tsx`:
+   - Tích hợp 2 chế độ: "Nghiên cứu sâu (Deep Research)" và "Tìm nhanh & Lấy Markdown".
+   - Tùy chỉnh số nguồn (3, 5, 8, 10 bài), ngôn ngữ (Tiếng Việt / English), prompt nâng cao.
+   - Trình xem trước Báo cáo AI định dạng Obsidian + Danh sách các trang nguồn đã cào.
+   - Các nút tác vụ: Copy MD, Tải .md, và Lưu trực tiếp vào thư mục Obsidian trên máy tính qua File System Access API.
+5. Tích hợp tab mới vào thanh điều hướng chính tại `apps/ui/ingestion-ui/src/components/ingestionV1.tsx`.
+6. Nâng cấp `bridge.js` và `bridge/cli.ts` nạp biến môi trường `CLAUDE_CODE_OAUTH_TOKEN` vào tiến trình con `spawn`.
+7. Build và triển khai bản phát hành mới (`index-e8WdAUA_.js`, `index-1ls84vBo.css`) lên Nginx VPS `https://firecrawl.dsc.edu.vn/`.
+
+---
+
 ## 2026-11-08 — Kích hoạt Persistent Token 1 năm (Claude setup-token) trên VPS
 
 **Yêu cầu**: Xử lý triệt để việc phiên OAuth của Claude Code bị hết hạn sau vài tiếng khi cào dịch hàng loạt khối lượng lớn (dừng ở bài 34/124).
