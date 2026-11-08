@@ -6,6 +6,24 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-08 — Khắc phục lỗi trang web bị trắng (HTTP 403 Forbidden tại thư mục assets)
+
+**Yêu cầu**: Sửa lỗi trang web `firecrawl.dsc.edu.vn` bị trắng tinh sau khi cập nhật giao diện.
+
+**Nguyên nhân gốc rễ**:
+- Khi dùng lệnh `scp -r` đẩy thư mục `dist/*` từ máy tính Windows lên thư mục `/var/www/firecrawl-ui/` trên VPS Linux, thư mục con `assets/` vô tình bị gắn quyền `700` (`drwx------`, chỉ user root truy cập được).
+- Tiến trình Nginx chạy dưới quyền user `nginx` bên trong container Docker không có quyền đọc các file JS/CSS trong `assets/`, dẫn tới mã lỗi **HTTP 403 (Forbidden)** khi trình duyệt tải `index-e8WdAUA_.js` và `index-1ls84vBo.css`. Trình duyệt không nạp được JavaScript nên màn hình hiển thị màu trắng.
+
+**Đã khắc phục**:
+- Chạy lệnh `chmod -R 755 /var/www/firecrawl-ui` trên VPS để cấp quyền đọc công khai cho Nginx.
+- Kiểm tra lại bằng lệnh HTTP:
+  + `index-e8WdAUA_.js`: HTTP 200 OK.
+  + `index-1ls84vBo.css`: HTTP 200 OK.
+  + `index.html`: HTTP 200 OK.
+- Trang web đã nạp lại bình thường 100%.
+
+---
+
 ## 2026-11-08 — Triển khai Tab "Tìm Kiếm Web & Deep Research Studio" (Khai thác Upstream v1 Search)
 
 **Yêu cầu**: Triển khai ngay tính năng mới từ bản cập nhật upstream Firecrawl để khai thác năng lực tìm kiếm thông tin trên toàn cầu kết hợp AI tổng hợp báo cáo.
