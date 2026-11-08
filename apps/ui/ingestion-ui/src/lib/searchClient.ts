@@ -39,13 +39,22 @@ export async function searchWeb(
   const limit = options.limit ?? 5;
   const lang = options.lang || "en";
   const baseUrl = (options.baseUrl || "").replace(/\/+$/, "");
-  const searchUrl = baseUrl ? `${baseUrl}/v1/search` : "/v1/search";
+  // Ưu tiên /v1/search trực tiếp, hoặc qua proxy /firecrawl/v1/search
+  let searchUrl = "/v1/search";
+  if (baseUrl && baseUrl !== "/firecrawl") {
+    searchUrl = `${baseUrl}/v1/search`;
+  }
+
+  const apiKey =
+    options.apiKey ||
+    (typeof window !== "undefined" ? localStorage.getItem("firecrawl_api_key") : "") ||
+    "firecrawl_appeawBFEvPFfGFPJnQWALBbhrRVDAPYkHXPSCWspSaMcyUgMZJfIsjwESJxWeemKSs";
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  if (options.apiKey) {
-    headers["Authorization"] = `Bearer ${options.apiKey}`;
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
   }
 
   const res = await fetch(searchUrl, {

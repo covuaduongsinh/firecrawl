@@ -6,6 +6,28 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-08 — Sửa lỗi 405 Not Allowed khi tìm kiếm tại Deep Research Studio
+
+**Yêu cầu**: Sửa lỗi `Lỗi tìm kiếm Firecrawl (405): 405 Not Allowed` khi người dùng nhập từ khóa tìm kiếm (ví dụ "nocobase v3") trong tab Tìm Kiếm & Deep Research.
+
+**Nguyên nhân gốc rễ**:
+1. Trong `searchClient.ts`, khi nhận cấu hình `baseUrl` mặc định là `/firecrawl`, client gửi yêu cầu đến `/firecrawl/v1/search`.
+2. Do proxy Traefik chỉ lọc các route `/v1/*`, `/v0/*`, `/admin/*`, yêu cầu `/firecrawl/*` được chuyển tiếp vào Nginx.
+3. Trong `nginx.conf` trước đó thiếu chỉ thị cấu hình proxy cho tiền tố `/firecrawl/`, khiến Nginx bắt vào route tĩnh `/` (`try_files $uri $uri/ /index.html`) và từ chối phương thức HTTP POST đến file HTML (mã lỗi 405 Not Allowed).
+
+**Đã khắc phục**:
+1. Cập nhật `apps/ui/ingestion-ui/nginx.conf`:
+   - Bổ sung `location /firecrawl/`, `location /v1/`, và `location /v2/` ủy quyền (proxy_pass) trực tiếp tới `http://api:3002`.
+   - Triển khai và khởi động lại Nginx container trên VPS.
+2. Cập nhật `apps/ui/ingestion-ui/src/lib/searchClient.ts`:
+   - Chuẩn hóa endpoint gọi thẳng `/v1/search` trên cùng domain hoặc qua `/firecrawl/v1/search`.
+   - Bổ sung fallback API Key Dokploy tự động.
+3. Build lại bundle mới (`index-JJ2khBKt.js`), đẩy lên `/var/www/firecrawl-ui/` và gán quyền `755`.
+4. Kiểm tra thực tế:
+   - Thử nghiệm truy vấn đúng từ khóa "nocobase v3" qua `/v1/search` và `/firecrawl/v1/search`: Cả hai đều trả về `HTTP 200 OK` và dữ liệu Markdown sạch của NocoBase 3.
+
+---
+
 ## 2026-11-08 — Khắc phục lỗi trang web bị trắng (HTTP 403 Forbidden tại thư mục assets)
 
 **Yêu cầu**: Sửa lỗi trang web `firecrawl.dsc.edu.vn` bị trắng tinh sau khi cập nhật giao diện.
