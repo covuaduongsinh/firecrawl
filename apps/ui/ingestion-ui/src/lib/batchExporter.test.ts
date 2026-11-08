@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   formatObsidianNote,
   isValidTranslatedMarkdown,
-  readArticleFromDirectory,
   safeFileSlug,
   syncWithOutputDirectory,
   writeArticleToDirectory,

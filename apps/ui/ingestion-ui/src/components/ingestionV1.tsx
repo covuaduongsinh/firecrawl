@@ -26,10 +26,12 @@ import {
   FileText,
   Code,
   FolderTree,
+  Compass,
 } from "lucide-react";
 import AIEngineSettings from "@/components/AIEngineSettings";
 import PromptBankSelector from "@/components/PromptBankSelector";
 import BatchDocExtractor from "@/components/BatchDocExtractor";
+import SearchResearchStudio from "@/components/SearchResearchStudio";
 import {
   AIEngineConfig,
   loadAIConfig,
@@ -153,7 +155,7 @@ const DEFAULT_JSON_SCHEMA = JSON.stringify(
 );
 
 export default function FirecrawlComponentV1() {
-  const [activeTab, setActiveTab] = useState<"scrape" | "extract" | "batch_tree">("batch_tree");
+  const [activeTab, setActiveTab] = useState<"batch_tree" | "search_research" | "extract" | "scrape">("batch_tree");
 
   // Scrape / Crawl Form State
   const [formData, setFormData] = useState<FormData>({
@@ -474,7 +476,7 @@ export default function FirecrawlComponentV1() {
   return (
     <div className="flex flex-col items-center justify-center p-4 max-w-6xl mx-auto w-full">
       {/* Mode Selector Tabs */}
-      <div className="flex bg-zinc-100 dark:bg-slate-900 p-1.5 rounded-xl mb-6 shadow-md w-full max-w-xl border border-zinc-200 dark:border-slate-800">
+      <div className="flex flex-wrap sm:flex-nowrap bg-zinc-100 dark:bg-slate-900 p-1.5 rounded-xl mb-6 shadow-md w-full max-w-3xl border border-zinc-200 dark:border-slate-800 gap-1">
         <button
           type="button"
           onClick={() => setActiveTab("batch_tree")}
@@ -489,6 +491,18 @@ export default function FirecrawlComponentV1() {
         </button>
         <button
           type="button"
+          onClick={() => setActiveTab("search_research")}
+          className={`flex-1 flex items-center justify-center py-2.5 px-3 rounded-lg text-xs font-semibold transition-all ${
+            activeTab === "search_research"
+              ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-sm"
+              : "text-zinc-600 dark:text-slate-400 hover:text-zinc-900 dark:hover:text-white"
+          }`}
+        >
+          <Compass className="w-4 h-4 mr-1.5 text-blue-300" />
+          Tìm Kiếm & Deep Research
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveTab("extract")}
           className={`flex-1 flex items-center justify-center py-2.5 px-3 rounded-lg text-xs font-semibold transition-all ${
             activeTab === "extract"
@@ -497,7 +511,7 @@ export default function FirecrawlComponentV1() {
           }`}
         >
           <Sparkles className="w-4 h-4 mr-1.5 text-orange-500" />
-          AI Extract (Đơn Trang)
+          AI Extract
         </button>
         <button
           type="button"
@@ -522,7 +536,16 @@ export default function FirecrawlComponentV1() {
         </div>
       )}
 
-      {activeTab !== "batch_tree" && (
+      {activeTab === "search_research" && (
+        <div className="w-full">
+          <SearchResearchStudio
+            firecrawlApiUrl={FIRECRAWL.baseUrl}
+            apiKey={FIRECRAWL.apiKey}
+          />
+        </div>
+      )}
+
+      {activeTab !== "batch_tree" && activeTab !== "search_research" && (
         <>
           <Card className="w-full shadow-lg border-zinc-200">
           <CardHeader>

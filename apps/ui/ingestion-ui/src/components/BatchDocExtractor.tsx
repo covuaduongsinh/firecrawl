@@ -306,7 +306,6 @@ export default function BatchDocExtractor({
               status: 'done' as const,
               markdownOutput: existing.markdownOutput,
               extractedData: existing.extractedData,
-              tokensUsed: existing.tokensUsed,
             };
           }
           return it;
