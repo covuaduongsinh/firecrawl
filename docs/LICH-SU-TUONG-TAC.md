@@ -6,6 +6,24 @@ Nhật ký ở mức dự án; quy tắc ngôn ngữ và plan-mode của chủ f
 
 ---
 
+## 2026-11-08 — Kích hoạt Persistent Token 1 năm (Claude setup-token) trên VPS
+
+**Yêu cầu**: Xử lý triệt để việc phiên OAuth của Claude Code bị hết hạn sau vài tiếng khi cào dịch hàng loạt khối lượng lớn (dừng ở bài 34/124).
+
+**Nguyên nhân gốc rễ**:
+- Đăng nhập OAuth trình duyệt (`claude.ai`) chỉ cấp Access Token ngắn hạn (4-8 tiếng) với cơ chế Refresh Token Rotation. Trên môi trường headless server không có trình duyệt để xoay vòng token mượt mà.
+
+**Đã làm**:
+- Người dùng chạy lệnh chính thức `claude setup-token` trên máy tính cá nhân để tạo token dài hạn (1 năm) gắn với gói thuê bao Claude Max.
+- Bơm token trực tiếp sang VPS qua kết nối mã hóa SSH vào tệp an toàn `/root/.claude/oauth_token.env` (phân quyền `600`).
+- Nâng cấp `bridge.js` và `bridge/middleware.ts` tự động phát hiện và nạp `CLAUDE_CODE_OAUTH_TOKEN` từ tệp cấu hình hoặc biến môi trường.
+- Kiểm tra xác minh:
+  + Lệnh CLI thực tế trên VPS qua bash source: dịch chuẩn xác `"Token vĩnh viễn 1 năm đang hoạt động"`.
+  + Endpoint `/api/cli/status`: `{"claude":{"available":true,"authenticated":true,"reason":"Sẵn sàng"}}`.
+  + Endpoint `/api/cli/extract`: test dịch qua web bridge trả về `"Mọi thứ đã được thiết lập hoàn hảo."` (HTTP 200).
+
+---
+
 ## 2026-11-07 — Ngăn chặn dịch lại bài đã dịch & Tự động đồng bộ với thư mục trên máy
 
 **Yêu cầu**: Sửa lỗi nhiều bài viết đã dịch xong trên máy tính nhưng hệ thống vẫn tiếp tục xếp vào hàng đợi dịch lại (123 bài thay vì 94 bài còn thiếu), làm tốn token và ghi đè lên các bài dịch tốt cũ.
