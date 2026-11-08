@@ -152,8 +152,31 @@ async function handleFetchHtml(req: IncomingMessage, res: ServerResponse, timeou
   sendJson(res, 200, { success: true, html: page.html, finalUrl: page.finalUrl });
 }
 
+export function getClaudeOAuthToken(): string | null {
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && process.env.CLAUDE_CODE_OAUTH_TOKEN.trim().length > 0) {
+    return process.env.CLAUDE_CODE_OAUTH_TOKEN.trim();
+  }
+  const userHome = os.homedir();
+  const tokenPaths = [
+    "/root/.claude/oauth_token.env",
+    path.join(userHome, ".claude", "oauth_token.env"),
+  ];
+  for (const p of tokenPaths) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = fs.readFileSync(p, "utf8").trim();
+        const match = raw.match(/CLAUDE_CODE_OAUTH_TOKEN=(.*)/);
+        const tok = match ? match[1].replace(/['"]/g, "").trim() : raw.replace(/['"]/g, "").trim();
+        if (tok.startsWith("sk-ant-")) return tok;
+      }
+    } catch {}
+  }
+  return null;
+}
+
 export function isClaudeAuthenticated(claudePath: string | null): boolean {
   if (!claudePath) return false;
+  if (getClaudeOAuthToken()) return true;
   if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim().length > 0) return true;
   const userHome = os.homedir();
   const credPaths = [
